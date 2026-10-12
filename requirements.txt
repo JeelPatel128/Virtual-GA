@@ -1,1 +1,14 @@
-pytest
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+python-dotenv>=1.0
+python-multipart>=0.0.9
+requests>=2.32
+numpy>=1.26
+google-genai>=1.0
+icalendar>=6.0
+recurring-ical-events>=3.0
+pypdf>=5.0
+python-docx>=1.1
+qrcode[pil]>=8.0

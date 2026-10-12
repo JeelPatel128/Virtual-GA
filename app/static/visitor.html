@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Virtual GA</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  body { display: flex; flex-direction: column; height: 100dvh; }
+  header { background: var(--red); color: #fff; padding: 14px 16px; display: flex; align-items: center; gap: 12px; }
+  header .dot { width: 38px; height: 38px; border-radius: 50%; background: #fff; color: var(--red); display: grid; place-items: center; font-weight: 800; }
+  header h1 { font-size: 17px; margin: 0; }
+  header p { font-size: 13px; margin: 0; opacity: .85; }
+  #status { display: none; padding: 10px 16px; font-size: 14px; background: var(--sys); color: var(--sys-ink); border-bottom: 1px solid var(--line); }
+  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  footer { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); background: var(--card); border-top: 1px solid var(--line); }
+  .row { display: flex; gap: 8px; }
+  .row input { border-radius: 999px; }
+  .ga-link { display: block; text-align: center; font-size: 14px; margin-top: 8px; background: none; border: 0; color: var(--red); text-decoration: underline; width: 100%; }
+  .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: none; align-items: flex-end; justify-content: center; }
+  .sheet { background: var(--card); width: 100%; max-width: 520px; border-radius: 20px 20px 0 0; padding: 20px 18px calc(20px + env(safe-area-inset-bottom)); max-height: 90dvh; overflow-y: auto; }
+  .sheet h2 { margin: 0 0 4px; font-size: 19px; }
+  .sheet .actions { display: flex; gap: 8px; margin-top: 16px; }
+  .sheet .actions .btn { flex: 1; }
+  #phoneBox { display: none; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; align-self: stretch; }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot">GA</div>
+  <div><h1>Virtual GA</h1><p>School of Business front desk</p></div>
+</header>
+<div id="status" role="status"></div>
+<main id="log" aria-live="polite"></main>
+<footer>
+  <form class="row" id="askForm">
+    <input id="q" type="text" placeholder="Type your question..." autocomplete="off" maxlength="1000" aria-label="Your question">
+    <button class="btn" id="sendBtn">Send</button>
+  </form>
+  <button class="ga-link" id="gaLink" type="button">Talk to a GA instead</button>
+</footer>
+
+<div class="sheet-bg" id="sheetBg">
+  <form class="sheet" id="handoffForm">
+    <h2>Get a GA</h2>
+    <p class="hint">We'll alert whoever is on duty. Their reply shows up in this chat.</p>
+    <label for="hName">Your name</label>
+    <input id="hName" type="text" maxlength="120" required>
+    <label for="hQ">What do you need help with?</label>
+    <textarea id="hQ" rows="3" maxlength="2000" required></textarea>
+    <label for="hPhone">Phone number <span class="hint">(optional)</span></label>
+    <input id="hPhone" type="tel" maxlength="40" placeholder="So a GA can call you back">
+    <label class="check"><input type="checkbox" id="hConsent"> The School of Business GA team may call or text me about this question. My number is deleted after 30 days.</label>
+    <div class="err" id="hErr"></div>
+    <div class="actions">
+      <button type="button" class="btn quiet" id="hCancel">Cancel</button>
+      <button class="btn" id="hSubmit">Alert a GA</button>
+    </div>
+  </form>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+let sid = null, lastId = 0, ticket = null, lastVisitorQ = "", polling = null, askedPhone = false;
+
+function store(k, v) { try { v === undefined ? localStorage.getItem(k) : localStorage.setItem(k, v); } catch (e) {} }
+function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || "Something went wrong");
+  return data;
+}
+
+function addMsg(m) {
+  const el = document.createElement("div");
+  el.className = "msg " + m.sender;
+  if (m.sender === "ga") {
+    const who = document.createElement("span"); who.className = "who"; who.textContent = (m.ga_name || "GA") + " (GA)";
+    el.appendChild(who);
+  }
+  el.appendChild(document.createTextNode(m.text));
+  const meta = m.meta || {};
+  (meta.images || []).forEach(src => { const i = document.createElement("img"); i.src = src; i.alt = "Related image"; i.loading = "lazy"; el.appendChild(i); });
+  if (meta.sources && meta.sources.length) {
+    const s = document.createElement("span"); s.className = "src"; s.textContent = "From: " + meta.sources.join(", "); el.appendChild(s);
+  }
+  if (meta.offer_handoff && !ticket) {
+    const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = "Yes, get a GA";
+    b.onclick = () => openSheet(); el.appendChild(b);
+  }
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function showStatus() {
+  const s = $("status");
+  const text = { waiting: "Waiting for a GA to respond...", on_the_way: "A GA is on the way.",
+                 follow_up: "A GA will follow up with you.", replied: "You're chatting with a GA." };
+  if (ticket && text[ticket.status]) { s.textContent = text[ticket.status]; s.style.display = "block"; }
+  else s.style.display = "none";
+  $("gaLink").style.display = ticket ? "none" : "block";
+  $("q").placeholder = ticket ? "Message the GA..." : "Type your question...";
+  document.querySelectorAll(".offer").forEach(b => b.style.display = ticket ? "none" : "");
+}
+
+function maybeAskPhone(hasPhone) {
+  if (askedPhone || !ticket || ticket.status !== "follow_up") return;
+  askedPhone = true;
+  if (hasPhone) return;
+  const box = document.createElement("form"); box.id = "phoneBox"; box.style.display = "block";
+  box.innerHTML = `<label for="pPhone" style="margin-top:0">Phone number for the GA to call you</label>
+    <input id="pPhone" type="tel" maxlength="40" required>
+    <label class="check"><input type="checkbox" id="pConsent" required> The GA team may call or text me about this. Deleted after 30 days.</label>
+    <div class="err" id="pErr"></div><button class="btn small" style="margin-top:8px">Save number</button>`;
+  box.onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api(`/api/session/${sid}/contact`, { method: "POST", body: JSON.stringify({ phone: $("pPhone").value, consent: $("pConsent").checked }) }); box.remove(); poll(); }
+    catch (err) { $("pErr").textContent = err.message; }
+  };
+  log.appendChild(box); log.scrollTop = log.scrollHeight;
+}
+
+async function poll() {
+  if (!sid) return;
+  try {
+    const d = await api(`/api/session/${sid}/messages?after=${lastId}`);
+    d.messages.forEach(m => { lastId = Math.max(lastId, m.id); addMsg(m); });
+    const prev = ticket && ticket.status;
+    ticket = d.ticket; showStatus();
+    if (ticket && ticket.status === "follow_up" && prev !== "follow_up") maybeAskPhone(!!load("vga_phone"));
+  } catch (e) {
+    if (String(e.message).includes("expired")) { store("vga_sid", ""); start(true); }
+  }
+}
+
+async function start(fresh) {
+  const saved = load("vga_sid"), savedAt = +(load("vga_sid_at") || 0);
+  if (!fresh && saved && Date.now() - savedAt < 12 * 3600e3) sid = saved;
+  else {
+    const d = await api("/api/session", { method: "POST" });
+    sid = d.session_id; store("vga_sid", sid); store("vga_sid_at", String(Date.now())); store("vga_phone", "");
+    log.innerHTML = ""; lastId = 0;
+  }
+  await poll();
+  clearInterval(polling); polling = setInterval(poll, 3000);
+}
+
+$("askForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $("q").value.trim(); if (!text) return;
+  $("q").value = ""; $("sendBtn").disabled = true; lastVisitorQ = text;
+  try { await api(`/api/session/${sid}/ask`, { method: "POST", body: JSON.stringify({ text }) }); }
+  catch (err) { addMsg({ sender: "system", text: err.message }); }
+  $("sendBtn").disabled = false; await poll(); $("q").focus();
+};
+
+function openSheet() {
+  $("hQ").value = lastVisitorQ; $("hErr").textContent = "";
+  $("hName").value = load("vga_name") || "";
+  $("sheetBg").style.display = "flex"; $("hName").focus();
+}
+$("gaLink").onclick = openSheet;
+$("hCancel").onclick = () => $("sheetBg").style.display = "none";
+$("handoffForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const phone = $("hPhone").value.trim();
+  $("hSubmit").disabled = true;
+  try {
+    await api(`/api/session/${sid}/handoff`, { method: "POST", body: JSON.stringify({
+      name: $("hName").value, question: $("hQ").value, phone: phone || null, consent: $("hConsent").checked }) });
+    store("vga_name", $("hName").value); if (phone) store("vga_phone", "1");
+    $("sheetBg").style.display = "none"; await poll();
+  } catch (err) { $("hErr").textContent = err.message; }
+  $("hSubmit").disabled = false;
+};
+
+start(false);
+</script>
+</body>
+</html>

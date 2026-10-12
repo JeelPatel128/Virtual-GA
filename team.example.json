@@ -1,0 +1,6 @@
+[
+  {"name": "Jeel Patel", "teams_email": "you@stevens.edu", "aliases": ["JP", "Jeel"], "lead": true},
+  {"name": "GA Two", "teams_email": "ga2@stevens.edu", "aliases": ["Two"], "lead": false},
+  {"name": "GA Three", "teams_email": "ga3@stevens.edu", "aliases": [], "lead": false},
+  {"name": "GA Four", "teams_email": "ga4@stevens.edu", "aliases": [], "lead": false}
+]

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GA Console</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  header { background: var(--red); color: #fff; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; }
+  header select { width: auto; padding: 6px 10px; border-radius: 999px; border: 0; color: var(--ink); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--line); }
+  .pill.waiting { background: #fde2e2; color: #8a1c1c; }
+  .pill.on_the_way, .pill.replied { background: var(--ga); color: var(--ga-ink); }
+  .pill.follow_up { background: var(--sys); color: var(--sys-ink); }
+  .q { font-size: 18px; font-weight: 600; margin: 8px 0; }
+  .facts { font-size: 14px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+  .facts a { font-weight: 700; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  #thread { display: flex; flex-direction: column; gap: 8px; max-height: 45vh; overflow-y: auto; padding: 4px; }
+  #thread .msg.visitor { background: var(--red); }
+  .reply { display: flex; gap: 8px; margin-top: 12px; }
+  .list-item { display: block; text-decoration: none; color: inherit; }
+  .list-item:hover { border-color: var(--red); }
+  #login { max-width: 360px; margin: 60px auto; }
+  .empty { text-align: center; color: var(--muted); padding: 30px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">GA Console</h1>
+  <label style="margin:0;color:#fff;font-weight:600;font-size:14px">I am
+    <select id="me" aria-label="Your name"></select></label>
+</header>
+
+<div class="wrap" id="app"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const app = $("app");
+const m = location.pathname.match(/\/ga\/ticket\/(\d+)/);
+const ticketId = m ? m[1] : null;
+const token = new URLSearchParams(location.search).get("t");
+let key = null; try { key = sessionStorage.getItem("ga_key"); } catch (e) {}
+let lastRender = "", onShift = [];
+
+function headers() { const h = { "Content-Type": "application/json" }; if (key) h["X-GA-Key"] = key; return h; }
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: headers(), ...opts });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(d.detail || "Error"); e.status = r.status; throw e; }
+  return d;
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const label = { waiting: "Waiting", on_the_way: "GA on the way", follow_up: "Follow up later", replied: "In conversation", resolved: "Resolved" };
+const me = () => $("me").value;
+const fmtPhone = (p) => { const d = String(p).replace(/\D/g, ""); return d.length === 10 ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}` : p; };
+
+async function loadTeam() {
+  let d;
+  try { d = await api(ticketId && token ? `/api/ga/team?tid=${ticketId}&t=${encodeURIComponent(token)}` : "/api/ga/team"); }
+  catch (e) { return; }
+  onShift = d.on_shift;
+  let saved = null; try { saved = localStorage.getItem("ga_me"); } catch (e) {}
+  $("me").innerHTML = d.names.map(n => `<option>${esc(n)}</option>`).join("");
+  const pick = saved && d.names.includes(saved) ? saved : (d.on_shift[0] || d.names[0]);
+  if (pick) $("me").value = pick;
+  $("me").onchange = () => { try { localStorage.setItem("ga_me", me()); } catch (e) {} };
+}
+
+function loginView(msg) {
+  app.innerHTML = `<form class="card" id="login"><h2 style="margin-top:0">GA console</h2>
+    <label for="k">Team key</label><input id="k" type="password" autocomplete="current-password">
+    <div class="err">${esc(msg || "")}</div><button class="btn" style="margin-top:10px">Open</button></form>`;
+  $("login").onsubmit = (e) => { e.preventDefault(); key = $("k").value; try { sessionStorage.setItem("ga_key", key); } catch (er) {} loadTeam().then(() => render(true)); };
+}
+
+async function act(action, extra = {}) {
+  if (!me()) { alert("Pick your name at the top first."); return; }
+  const q = token ? `?t=${encodeURIComponent(token)}` : "";
+  try { await api(`/api/ga/ticket/${ticketId}/action${q}`, { method: "POST", body: JSON.stringify({ ga_name: me(), action, ...extra }) }); render(true); }
+  catch (e) { alert(e.message); }
+}
+
+async function ticketView(force) {
+  const q = token ? `?t=${encodeURIComponent(token)}` : "";
+  let t;
+  try { t = await api(`/api/ga/ticket/${ticketId}${q}`); }
+  catch (e) { if (e.status === 401 && !token) return loginView(key ? "Wrong key" : ""); app.innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
+  const sig = JSON.stringify([t.status, t.messages.length]);
+  if (!force && sig === lastRender) return; lastRender = sig;
+  const typing = $("replyText") ? $("replyText").value : "";
+  $("title").textContent = `Ticket #${t.id}`;
+  const open = t.status !== "resolved";
+  app.innerHTML = `
+    <div class="card">
+      <span class="pill ${t.status}">${label[t.status] || t.status}</span>
+      ${t.escalated ? '<span class="pill waiting">Escalated to lead</span>' : ""}
+      <div class="q">${esc(t.question)}</div>
+      <div class="facts">
+        <span>${esc(t.visitor_name || "No name")}</span>
+        <span>${t.visitor_phone ? `<a href="tel:${esc(t.visitor_phone)}">${esc(fmtPhone(t.visitor_phone))}</a>` : "No phone left"}</span>
+        <span>Asked ${esc(t.created_at)}</span>
+        ${t.responded_by ? `<span>Picked up by ${esc(t.responded_by)}</span>` : ""}
+      </div>
+      ${open ? `<div class="btns">
+        <button class="btn" data-a="on_my_way" data-m="2">On my way (2 min)</button>
+        <button class="btn" data-a="on_my_way" data-m="5">On my way (5 min)</button>
+        <button class="btn ghost" data-a="on_my_way" data-m="10">10 min</button>
+        <button class="btn quiet" data-a="busy">Busy, I'll follow up</button>
+        <button class="btn quiet" data-a="resolve">Mark resolved</button>
+      </div>` : ""}
+    </div>
+    <div class="card">
+      <h3 style="margin:0 0 10px;font-size:15px">Conversation</h3>
+      <div id="thread"></div>
+      ${open ? `<form class="reply" id="replyForm"><input id="replyText" type="text" placeholder="Reply to the visitor..." maxlength="2000"><button class="btn">Send</button></form>` : ""}
+    </div>
+    ${token ? "" : '<p><a href="/ga">All open tickets</a></p>'}`;
+  const th = $("thread");
+  t.messages.forEach(mm => {
+    const el = document.createElement("div"); el.className = "msg " + mm.sender;
+    const who = { visitor: t.visitor_name || "Visitor", bot: "Virtual GA", ga: (mm.ga_name || "GA"), system: "" }[mm.sender];
+    if (who) { const w = document.createElement("span"); w.className = "who"; w.textContent = `${who} · ${mm.at}`; el.appendChild(w); }
+    el.appendChild(document.createTextNode(mm.text)); th.appendChild(el);
+  });
+  th.scrollTop = th.scrollHeight;
+  app.querySelectorAll("[data-a]").forEach(b => b.onclick = () => {
+    if (b.dataset.a === "resolve" && !confirm("Mark this as resolved?")) return;
+    act(b.dataset.a, b.dataset.m ? { minutes: +b.dataset.m } : {});
+  });
+  if ($("replyForm")) {
+    $("replyText").value = typing;
+    $("replyForm").onsubmit = (e) => { e.preventDefault(); const text = $("replyText").value.trim(); if (text) { $("replyText").value = ""; act("reply", { text }); } };
+  }
+}
+
+async function listView(force) {
+  if (!key) return loginView();
+  let d;
+  try { d = await api("/api/ga/tickets"); } catch (e) { key = null; try { sessionStorage.removeItem("ga_key"); } catch (er) {} return loginView("Wrong key"); }
+  const sig = JSON.stringify(d.tickets.map(t => [t.id, t.status, t.waiting_minutes]));
+  if (!force && sig === lastRender) return; lastRender = sig;
+  $("title").textContent = "Open front desk requests";
+  app.innerHTML = `<p class="hint">On shift now: ${esc(onShift.join(", ") || "nobody on the calendar")}</p>` +
+    (d.tickets.length ? d.tickets.map(t => `
+    <a class="card list-item" href="/ga/ticket/${t.id}">
+      <span class="pill ${t.status}">${label[t.status] || t.status}</span>
+      ${t.escalated ? '<span class="pill waiting">Escalated</span>' : ""}
+      <div class="q">${esc(t.question)}</div>
+      <div class="facts"><span>${esc(t.visitor_name || "No name")}</span><span>${t.has_phone ? "Left a phone number" : "No phone"}</span>
+      <span>${esc(t.created_at)} (${t.waiting_minutes} min ago)</span></div>
+    </a>`).join("") : '<div class="empty">No open requests. Quiet desk.</div>');
+}
+
+const render = (force) => ticketId ? ticketView(force) : listView(force);
+loadTeam().then(() => render(true));
+setInterval(() => render(false), 4000);
+</script>
+</body>
+</html>

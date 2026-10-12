@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual GA Admin</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  header { background: var(--red); color: #fff; padding: 14px 16px; }
+  header h1 { font-size: 17px; margin: 0; }
+  nav { display: flex; gap: 4px; padding: 0 12px; background: var(--card); border-bottom: 1px solid var(--line); overflow-x: auto; }
+  nav button { background: none; border: 0; padding: 12px 14px; font-weight: 600; color: var(--muted); border-bottom: 3px solid transparent; white-space: nowrap; }
+  nav button.on { color: var(--red); border-color: var(--red); }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
+  .card h2 { font-size: 16px; margin: 0 0 4px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .doc { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .doc:first-child { border-top: 0; }
+  .doc .t { font-weight: 600; }
+  .doc .p { font-size: 13px; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .tag { font-size: 11px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 6px; background: var(--line); margin-right: 6px; }
+  .ok { color: #1f7a45; font-weight: 700; } .no { color: #b3261e; font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { text-align: left; padding: 8px 6px; border-top: 1px solid var(--line); }
+  .stat { font-size: 28px; font-weight: 800; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .stats .card { margin: 0; }
+  section { display: none; } section.on { display: block; }
+  #login { max-width: 360px; margin: 60px auto; }
+  .msgline { font-size: 14px; margin-top: 8px; min-height: 1em; }
+  ul { padding-left: 20px; }
+</style>
+</head>
+<body>
+<header><h1>Virtual GA admin</h1></header>
+<div id="gate"></div>
+<div id="main" style="display:none">
+  <nav>
+    <button data-tab="kb" class="on">Knowledge</button>
+    <button data-tab="sched">Schedule</button>
+    <button data-tab="digest">Today</button>
+    <button data-tab="setup">Setup</button>
+  </nav>
+  <div class="wrap">
+    <section id="kb" class="on">
+      <div class="grid">
+        <form class="card" id="qaForm">
+          <h2>Add a Q&amp;A</h2>
+          <p class="hint">The fastest way to teach it. One question, one clear answer.</p>
+          <label for="qaQ">Question</label><input id="qaQ" type="text" required maxlength="500">
+          <label for="qaA">Answer</label><textarea id="qaA" rows="4" required></textarea>
+          <button class="btn" style="margin-top:10px">Save</button><div class="msgline" id="qaMsg"></div>
+        </form>
+        <form class="card" id="upForm">
+          <h2>Upload a file</h2>
+          <p class="hint">PDF, Word, text, image (flyer, map, screenshot) or video. Images and video are read by AI.</p>
+          <label for="upFile">File</label><input id="upFile" type="file" required accept=".pdf,.docx,.txt,.md,.csv,image/*,video/*">
+          <label for="upTitle">Title</label><input id="upTitle" type="text" maxlength="300" placeholder="e.g. Babbio 4th floor map">
+          <label for="upDesc">Notes <span class="hint">(optional, added to what AI reads)</span></label><textarea id="upDesc" rows="2"></textarea>
+          <button class="btn" style="margin-top:10px">Upload</button><div class="msgline" id="upMsg"></div>
+        </form>
+      </div>
+      <form class="card" id="noteForm">
+        <h2>Paste text</h2>
+        <p class="hint">Office hours, a directory, an email with instructions, anything longer.</p>
+        <label for="nT">Title</label><input id="nT" type="text" required maxlength="300">
+        <label for="nX">Text</label><textarea id="nX" rows="5" required></textarea>
+        <button class="btn" style="margin-top:10px">Save</button><div class="msgline" id="nMsg"></div>
+      </form>
+      <form class="card" id="searchForm">
+        <h2>Test what it finds</h2>
+        <div class="reply" style="display:flex;gap:8px"><input id="sq" type="search" placeholder="Ask a test question"><button class="btn">Search</button></div>
+        <div id="sres"></div>
+      </form>
+      <div class="card"><h2>Knowledge base</h2><div id="jobs"></div><div id="docs" class="hint">Loading...</div></div>
+    </section>
+
+    <section id="sched">
+      <div class="card"><h2>Who's on shift</h2><div id="schedBody">Loading...</div></div>
+    </section>
+
+    <section id="digest">
+      <div class="stats" id="dStats"></div>
+      <div class="card" style="margin-top:14px"><h2>Questions it couldn't answer today</h2>
+        <p class="hint">Add these as Q&amp;As so it can answer next time.</p><div id="dGaps"></div></div>
+      <button class="btn ghost" id="sendDigest">Send today's digest to Teams now</button><span class="msgline" id="dMsg"></span>
+    </section>
+
+    <section id="setup">
+      <div class="card"><h2>Connections</h2><div id="setupBody">Loading...</div>
+        <div class="btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn" id="testTeams">Send a Teams test</button>
+          <button class="btn quiet" id="reembed">Re-index knowledge with AI</button>
+        </div><div class="msgline" id="setupMsg"></div></div>
+      <div class="card"><h2>QR code for the desk</h2>
+        <p class="hint">Print this and put it on the front desk.</p>
+        <img src="/qr.png" alt="QR code for the Virtual GA" style="width:200px;height:200px;background:#fff;padding:8px;border-radius:12px">
+        <p><a href="/qr.png" download="virtual-ga-qr.png">Download QR code</a> · <a href="/" target="_blank">Open visitor chat</a> · <a href="/ga" target="_blank">Open GA console</a></p></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let key = null; try { key = sessionStorage.getItem("admin_key"); } catch (e) {}
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(path, opts = {}) {
+  const h = { "X-Admin-Key": key || "" };
+  if (!(opts.body instanceof FormData)) h["Content-Type"] = "application/json";
+  const r = await fetch(path, { ...opts, headers: h });
+  const d = await r.json().catch(() => ({}));
+  if (r.status === 401) { showGate("Wrong password"); throw new Error("Wrong password"); }
+  if (!r.ok) throw new Error(d.detail ? (typeof d.detail === "string" ? d.detail : "Check the fields") : "Error");
+  return d;
+}
+function flash(id, text, bad) { const el = $(id); el.textContent = text; el.className = "msgline " + (bad ? "no" : "ok"); setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 5000); }
+
+function showGate(msg) {
+  $("main").style.display = "none";
+  $("gate").innerHTML = `<form class="card" id="login"><h2>Admin sign in</h2><label for="pw">Password</label>
+    <input id="pw" type="password" autocomplete="current-password"><div class="err">${esc(msg || "")}</div>
+    <button class="btn" style="margin-top:10px">Sign in</button></form>`;
+  $("login").onsubmit = async (e) => { e.preventDefault(); key = $("pw").value; try { sessionStorage.setItem("admin_key", key); } catch (er) {}
+    try { await api("/api/admin/login", { method: "POST" }); boot(); } catch (er) {} };
+}
+
+async function loadDocs() {
+  const d = await api("/api/admin/docs");
+  $("jobs").innerHTML = d.jobs.map(j => `<p class="hint">${j.status === "failed" ? `<span class="no">Failed:</span> ${esc(j.title)}: ${esc(j.error)} <button class="btn small quiet" data-dismiss="${esc(j.id)}">Dismiss</button>` : `Processing ${esc(j.title)}... (video can take a few minutes)`}</p>`).join("");
+  $("jobs").querySelectorAll("[data-dismiss]").forEach(b => b.onclick = async () => { await api(`/api/admin/jobs/${b.dataset.dismiss}/dismiss`, { method: "POST" }); loadDocs(); });
+  $("docs").innerHTML = d.docs.length ? d.docs.map(x => `<div class="doc"><div><div class="t"><span class="tag">${esc(x.kind)}</span>${esc(x.title)}</div>
+    <div class="p">${esc(x.preview)}</div><div class="hint">${esc(x.created_at)}${x.added_by ? " · " + esc(x.added_by) : ""}</div></div>
+    <button class="btn small quiet" data-del="${x.id}">Delete</button></div>`).join("") : "Nothing yet. Add your first Q&A above.";
+  $("docs").querySelectorAll("[data-del]").forEach(b => b.onclick = async () => { if (confirm("Delete this from the knowledge base?")) { await api(`/api/admin/docs/${b.dataset.del}`, { method: "DELETE" }); loadDocs(); } });
+  if (d.jobs.some(j => j.status === "processing")) setTimeout(loadDocs, 4000);
+}
+
+$("qaForm").onsubmit = async (e) => { e.preventDefault();
+  try { await api("/api/admin/qa", { method: "POST", body: JSON.stringify({ question: $("qaQ").value, answer: $("qaA").value }) });
+    $("qaQ").value = ""; $("qaA").value = ""; flash("qaMsg", "Saved"); loadDocs(); } catch (er) { flash("qaMsg", er.message, true); } };
+$("noteForm").onsubmit = async (e) => { e.preventDefault();
+  try { await api("/api/admin/note", { method: "POST", body: JSON.stringify({ title: $("nT").value, text: $("nX").value }) });
+    $("nT").value = ""; $("nX").value = ""; flash("nMsg", "Saved"); loadDocs(); } catch (er) { flash("nMsg", er.message, true); } };
+$("upForm").onsubmit = async (e) => { e.preventDefault();
+  const f = $("upFile").files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f); fd.append("title", $("upTitle").value || f.name); fd.append("description", $("upDesc").value);
+  try { flash("upMsg", "Uploading..."); await api("/api/admin/upload", { method: "POST", body: fd });
+    $("upForm").reset(); flash("upMsg", "Uploaded. Processing now."); loadDocs(); } catch (er) { flash("upMsg", er.message, true); } };
+$("searchForm").onsubmit = async (e) => { e.preventDefault();
+  const d = await api("/api/admin/search?q=" + encodeURIComponent($("sq").value));
+  $("sres").innerHTML = d.hits.length ? d.hits.map(h => `<div class="doc"><div><div class="t">${esc(h.title)} <span class="hint">score ${h.score} (${h.method})</span></div><div class="p">${esc(h.text)}</div></div></div>`).join("")
+    : '<p class="hint">Nothing matched. The bot would offer to get a GA.</p>'; };
+
+async function loadSched() {
+  const s = await api("/api/admin/schedule");
+  $("schedBody").innerHTML = `<p>Calendar: ${s.connected ? '<span class="ok">connected</span>' : '<span class="no">not connected</span>'}${s.error ? " · " + esc(s.error) : ""}</p>
+    <p><b>On shift now:</b> ${esc(s.on_shift_now.join(", ") || "nobody")}</p>
+    <table><tr><th>Today</th><th>Event</th><th>Matched GA</th></tr>${s.today.map(x => `<tr><td>${esc(x.start)} to ${esc(x.end)}</td><td>${esc(x.title)}</td>
+    <td>${x.matched_gas.length ? esc(x.matched_gas.join(", ")) : '<span class="no">no match, check names in team.json</span>'}</td></tr>`).join("") || '<tr><td colspan="3" class="hint">No events today</td></tr>'}</table>`;
+}
+
+async function loadDigest() {
+  const d = await api("/api/admin/digest");
+  const tiles = [["Questions", d.questions], ["Bot answered", d.answered_by_bot], ["Handed to GA", d.handoffs], ["Escalated", d.escalated], ["Still open", d.still_open], ["Avg response", d.avg_response_min == null ? "n/a" : d.avg_response_min + " min"]];
+  $("dStats").innerHTML = tiles.map(([k, v]) => `<div class="card"><div class="hint">${k}</div><div class="stat">${esc(v)}</div></div>`).join("");
+  $("dGaps").innerHTML = d.unanswered.length ? `<ul>${d.unanswered.map((q, i) => `<li>${esc(q)} <button class="btn small ghost" data-gap="${i}" style="margin:4px 0">Answer this</button></li>`).join("")}</ul>` : '<p class="hint">None today.</p>';
+  $("dGaps").querySelectorAll("[data-gap]").forEach(b => b.onclick = () => {
+    document.querySelector('nav button[data-tab="kb"]').click(); $("qaQ").value = d.unanswered[+b.dataset.gap]; $("qaA").focus(); });
+}
+$("sendDigest").onclick = async () => { try { await api("/api/admin/digest/send", { method: "POST" }); flash("dMsg", " Sent"); } catch (er) { flash("dMsg", " " + er.message, true); } };
+
+async function loadSetup() {
+  const s = await api("/api/admin/status");
+  const row = (name, ok, tip) => `<tr><td>${name}</td><td>${ok ? '<span class="ok">Ready</span>' : '<span class="no">Not set</span>'}</td><td class="hint">${tip}</td></tr>`;
+  $("setupBody").innerHTML = `<table>
+    ${row("Gemini AI", s.ai_enabled, "GEMINI_API_KEY. Without it the bot uses keyword search and can't read images or video.")}
+    ${row("Teams alerts", s.teams_configured, "TEAMS_WEBHOOK_URL from a Teams Workflow.")}
+    ${row("Google Calendar", s.calendar_configured, "GCAL_ICS_URL, the calendar's secret iCal address.")}
+    </table><p class="hint">Public link: ${esc(s.public_url)} · Open tickets: ${s.open_tickets}</p>
+    <p><b>Team:</b> ${s.team.map(g => esc(g.name) + (g.lead ? " (lead)" : "")).join(", ") || '<span class="no">team.json is empty</span>'}</p>`;
+}
+$("testTeams").onclick = async () => { const r = await api("/api/admin/test-teams", { method: "POST" });
+  flash("setupMsg", r.sent ? "Sent. Check the Teams channel." : (r.webhook_configured ? "Teams rejected it. Check the server log." : "Set TEAMS_WEBHOOK_URL first."), !r.sent); };
+$("reembed").onclick = async () => { try { const r = await api("/api/admin/reembed", { method: "POST" }); flash("setupMsg", `Re-indexed ${r.embedded} chunks.`); } catch (er) { flash("setupMsg", er.message, true); } };
+
+const loaders = { kb: loadDocs, sched: loadSched, digest: loadDigest, setup: loadSetup };
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button, section").forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); $(b.dataset.tab).classList.add("on"); loaders[b.dataset.tab]().catch(() => {});
+});
+
+function boot() { $("gate").innerHTML = ""; $("main").style.display = "block"; loadDocs().catch(() => {}); }
+if (key) api("/api/admin/login", { method: "POST" }).then(boot).catch(() => {}); else showGate();
+</script>
+</body>
+</html>

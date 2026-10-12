@@ -1,0 +1,44 @@
+.env
+team.json
+*.db
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+egg-info/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtualenv
+.venv
+ENV/
+env/
+venv/
+
+# VS Code
+.vscode/
+
+# Pytest cache
+.pytest_cache/
+
+# Database files
+*.sqlite3
+*.db
+
+# Local env files
+.env
+.env.*

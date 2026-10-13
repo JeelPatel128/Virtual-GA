@@ -13,18 +13,18 @@ Legend: **[JP]** = you do it (accounts, approvals, content, decisions). **[CC]**
 | 0.1 | JP | Create a **private** GitHub repo `virtual-ga`, unzip this folder into it, and open Claude Code in that folder | `git status` works |
 | 0.2 | CC | Init git, first commit, confirm `.gitignore` blocks `.env`, `team.json` and `*.db`, run tests | ✅ Done. Rebased onto GitHub's starter commits, tests pass, pushed to `main`. |
 | 0.3 | JP | Get a **Gemini API key** (Google AI Studio) | ✅ Key in `.env`, verified working |
-| 0.4 | JP | Create a **Supabase** project and copy the Session pooler URI | ⚠️ URI in `.env`, but auth is failing — see note below |
-| 0.5 | JP | In Teams, create a **Front Desk Alerts** channel and add the Workflows webhook | ⚠️ A URL is in `.env` but untested (not asked for yet, see note) |
+| 0.4 | JP | Create a **Supabase** project and copy the Session pooler URI | ✅ URI in `.env`, auth fixed, tables created |
+| 0.5 | JP | In Teams, create a **Front Desk Alerts** channel and add the Workflows webhook | ✅ URL in `.env`, test card confirmed delivered to the GA group chat |
 | 0.6 | JP | Get the GA calendar's **secret iCal address**. Rename shift events so each title contains the GA's name | ✅ URL in `.env`, verified working. 2 of 3 today's shift titles ("Shriya", "Arpan") don't match anyone in `team.json` yet |
-| 0.7 | JP | Fill in `team.json`: 4 names, Stevens emails, calendar aliases, you as lead | ⏳ Still placeholder data — JP to send names/emails/aliases |
-| 0.8 | CC | Run locally against the real services: Gemini answers, Supabase tables, Teams test card, calendar matching. Fix whatever breaks (model names, Workflows quirks, mention format) | ⚠️ Partial — see Step 5 results note below |
+| 0.7 | JP | Fill in `team.json`: 4 names, Stevens emails, calendar aliases, you as lead | ⏳ Still placeholder data — JP to send real names/emails/aliases |
+| 0.8 | CC | Run locally against the real services: Gemini answers, Supabase tables, Teams test card, calendar matching. Fix whatever breaks (model names, Workflows quirks, mention format) | ✅ Gemini, Supabase, calendar, and Teams delivery all verified. Mention-pings-you check still pending real `team.json` data (0.7) |
 
 **Step 5 results (2026-10-13):**
-- **Supabase: FAIL.** Connection structurally correct (Session pooler host, port 5432, project-scoped username) but authentication fails. The DB password in `.env` contained raw `#`, `[`, `]` characters — likely Supabase's dashboard `[YOUR-PASSWORD]` placeholder got merged with the real password during copy-paste. JP: go to Supabase → Project Settings → Database, get/reset the actual password value only, and replace just the password segment of `DATABASE_URL` (between `:` and `@`).
+- **Supabase: PASS.** Password re-encoding issue traced to a leftover `[YOUR-PASSWORD]`-style artifact; after JP reset the password, connected and created all 7 tables (`chunks`, `docs`, `kv`, `messages`, `query_log`, `sessions`, `tickets`).
 - **Gemini: PASS.** Real API calls succeeded (embeddings + `gemini-2.5-flash` generation). Reworded question answered correctly with high confidence; unrelated question correctly triggered "not sure." Current model names in `.env.example` are valid for this key — no change needed.
 - **Calendar: PASS.** Connects and reads today's 3 shifts. "Jeel" matched "Jeel Patel" (placeholder data); "Shriya" and "Arpan" are unmatched since they're not in `team.json` yet.
-- **Teams: SKIPPED** per JP's instruction (not asked for yet in this pass).
-- **Tests:** `tests/test_flow.py` — ALL CHECKS PASSED (run twice).
+- **Teams: PASS (delivery).** Test card sent via `/api/admin/test-teams` and confirmed by JP as posted to the GA group chat. The `@mention` target was still the placeholder lead email in `team.json` (`you@stevens.edu`), so it likely did not actually ping anyone — recheck once 0.7 has real emails.
+- **Tests:** `tests/test_flow.py` — ALL CHECKS PASSED (run three times across this session).
 - **Python 3.12 (render.yaml pin):** requirements install cleanly and the app imports fine on 3.12.7, tested in an isolated venv alongside the local 3.14 environment. No 3.14-only code.
 
 ## Phase 1: Deploy (this week)

@@ -400,6 +400,33 @@ def _format_person_answer(p: "Person", text: str, show_extensions: bool) -> dict
     return {"answer": answer, "meta": meta}
 
 
+def search_people(db, q: str, limit: int = 10) -> list["Person"]:
+    """Plain search for the GA console: no visitor-facing gating (a GA isn't a stranger
+    being told about someone - they can see any reasonable match, always with extension
+    and email, regardless of the show_extensions setting)."""
+    words = _core_words(q)
+    if not words:
+        return []
+    phrase = " ".join(words)
+    role_q = _role_tokens(q) - ROLE_STOPWORDS
+    people = db.scalars(select(Person).where(Person.active.is_(True))).all()
+    scored = []
+    for p in people:
+        best = 0.0
+        for cand in _candidate_strings(p):
+            cand_core = " ".join(_core_words(cand)) or cand
+            best = max(best, 1.0 if cand_core == phrase else SequenceMatcher(None, phrase, cand_core).ratio())
+        if role_q and p.roles:
+            for rp in p.roles.split(";"):
+                rt = _role_tokens(rp)
+                if rt:
+                    best = max(best, len(role_q & rt) / len(role_q))
+        if best >= 0.5:
+            scored.append((best, p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored[:limit]]
+
+
 def resolve(db, sess, text: str) -> dict | None:
     """Returns an answer dict ({"answer", "meta"}), or None if this doesn't look like a
     person question at all, in which case the caller should fall through to the AI/knowledge

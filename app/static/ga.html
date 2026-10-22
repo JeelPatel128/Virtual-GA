@@ -137,6 +137,17 @@ async function ticketView(force) {
   }
 }
 
+async function dirSearch() {
+  const q = $("dirQ").value.trim();
+  if (!q) { $("dirResults").innerHTML = ""; return; }
+  const d = await api(`/api/ga/directory/search?q=${encodeURIComponent(q)}`);
+  $("dirResults").innerHTML = d.results.length ? d.results.map(p => `
+    <div class="q" style="font-size:15px;margin:10px 0 2px">${esc(p.name)} <span class="hint">${esc(p.title)}</span></div>
+    <div class="facts"><span>${esc(p.building)}${p.room ? " " + esc(p.room) : ""}</span>
+    <span>Ext. ${esc(p.extension || "none")}</span><span>${esc(p.email || "no email on file")}</span></div>`
+  ).join("") : '<p class="hint">No matches.</p>';
+}
+
 async function listView(force) {
   if (!key) return loginView();
   let d;
@@ -152,7 +163,10 @@ async function listView(force) {
       <div class="q">${esc(t.question)}</div>
       <div class="facts"><span>${esc(t.visitor_name || "No name")}</span><span>${t.has_phone ? "Left a phone number" : "No phone"}</span>
       <span>${esc(t.created_at)} (${t.waiting_minutes} min ago)</span></div>
-    </a>`).join("") : '<div class="empty">No open requests. Quiet desk.</div>');
+    </a>`).join("") : '<div class="empty">No open requests. Quiet desk.</div>') +
+    `<div class="card"><h3 style="margin:0 0 10px;font-size:15px">Directory</h3>
+    <input id="dirQ" type="search" placeholder="Search a name, alias, or topic..."><div id="dirResults"></div></div>`;
+  $("dirQ").oninput = dirSearch;
 }
 
 const render = (force) => ticketId ? ticketView(force) : listView(force);

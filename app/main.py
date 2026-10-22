@@ -321,6 +321,14 @@ def ga_team(tid: int | None = None, t: str | None = None, x_ga_key: str | None =
     return {"names": [g.name for g in load_team()], "on_shift": [g.name for g in schedule.on_shift_now()]}
 
 
+@app.get("/api/ga/directory/search", dependencies=[Depends(require_ga)])
+def ga_directory_search(q: str, db=Depends(get_db)):
+    results = directory.search_people(db, q)
+    return {"results": [{"id": p.id, "name": p.name, "title": p.title, "building": p.building,
+                         "room": p.room, "floor": p.floor, "extension": p.extension,
+                         "email": p.email, "office_hours": p.office_hours} for p in results]}
+
+
 @app.get("/api/ga/tickets", dependencies=[Depends(require_ga)])
 def ga_tickets(include_resolved: bool = False, db=Depends(get_db)):
     q = select(Ticket).order_by(Ticket.id.desc()).limit(50)

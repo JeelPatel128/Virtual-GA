@@ -491,6 +491,19 @@ def test_message_ticket_deadline_and_escalation():
     print("message ticket deadline/escalation test passed")
 
 
+def test_ga_directory_search():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        assert c.get("/api/ga/directory/search?q=Howie").status_code == 401
+        r = c.get("/api/ga/directory/search?q=Howie", headers={"X-GA-Key": "gakey"})
+        assert r.status_code == 200
+        results = r.json()["results"]
+        assert any(p["name"] == "Haoying Xu" for p in results), results
+        xu = next(p for p in results if p["name"] == "Haoying Xu")
+        assert xu["extension"] == "3476", "GA console always sees the extension"
+    print("GA directory search test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -655,4 +668,5 @@ if __name__ == "__main__":
     test_place_matching()
     test_common_word_gate_faq_regression()
     test_message_ticket_deadline_and_escalation()
+    test_ga_directory_search()
     test_full_flow()

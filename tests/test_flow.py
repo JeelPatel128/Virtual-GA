@@ -148,6 +148,9 @@ DIRECTORY_FIXTURE_CSV = PEOPLE_CSV_HEADER + "\n" + "\n".join([
     f'Associate Professor,Faculty,Babbio Center,414,4,,"{HOURS}",8062,,,yes,yes,2026-01-01,',
     f'Violet Chen,Violet,Chen,"Dr. Chen | Prof. Chen | Professor Chen | Professor Violet | Violet",'
     f'Assistant Professor,Faculty,Babbio Center,629,6,,"{HOURS}",3521,,,yes,yes,2026-01-01,',
+    # common-word surname, to make the common-word-gate regression test meaningful
+    f'Jamie Park,Jamie,Park,"Park | Jamie",Lecturer,Faculty,Babbio Center,617,6,,"{HOURS}",'
+    f'5500,,,yes,yes,2026-01-01,',
 ])
 
 
@@ -373,6 +376,77 @@ def test_place_matching():
     print("place matching test passed")
 
 
+FAQ_REGRESSION_QUESTIONS = [
+    "can I park here",
+    "oh where is the printer",
+    "do you have an HDMI cable",
+    "how do I register for a COPA workshop",
+    "does the capstone project count for credit",
+    "can I book the conference room",
+    "is there wifi in the building",
+    "where can I print something",
+    "what are COPA walk-in hours",
+    "how do I reserve a conference room for a meeting",
+    "where is the nearest parking garage",
+    "is the sun out today",
+    "how do I connect to the printer",
+    "what's the wifi password",
+    "is there a charger I can borrow",
+    "can I get a parking pass",
+    "where do I return a library book",
+    "how do I print my transcript",
+    "is there a vending machine nearby",
+    "where is the nearest ATM",
+    "can I get a visitor badge",
+    "how do I book a study room",
+    "is there a lost and found",
+    "where is the elevator",
+    "how do I get to the fourth floor",
+    "is the gym open right now",
+    "where can I buy coffee",
+    "how do I submit a reimbursement form",
+    "is there a printer on this floor",
+    "can I charge my phone here",
+    "where is the nearest bathroom",
+    "how do I get a guest wifi code",
+    "is there a shuttle to campus",
+    "where do I pick up my ID card",
+    "can someone fix the projector",
+    "is the HDMI cable in the drawer",
+    "how long is the park open",
+    "where is the sun deck",
+    "can I sit in the lounge and work",
+    "is there a quiet study space",
+    "how do I reset my student email password",
+    "where is the nearest printer that takes color",
+    "can I get a campus map",
+    "is there parking validation available",
+    "where do I drop off a package",
+    "how do I request a transcript",
+    "is there a notary on campus",
+    "can I use the whiteboard in the conference room",
+    "where is the recycling bin",
+    "how do I report a maintenance issue",
+]
+
+
+def test_common_word_gate_faq_regression():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        for q in FAQ_REGRESSION_QUESTIONS:
+            last = _ask_text(c, sid, q)
+            assert "Jamie Park" not in last["text"], (q, last)
+            assert "couldn't find anyone" not in last["text"], (q, last)
+            assert not last["meta"].get("choices"), (q, last)
+
+        # a real person must still resolve when a title word genuinely supports it
+        last = _ask_text(c, sid, "is Professor Park in today")
+        assert "Jamie Park" in last["text"], last
+    print(f"FAQ regression test passed ({len(FAQ_REGRESSION_QUESTIONS)} questions)")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -535,4 +609,5 @@ if __name__ == "__main__":
     test_role_matching()
     test_route_topics_here_excludes_from_role_matching()
     test_place_matching()
+    test_common_word_gate_faq_regression()
     test_full_flow()

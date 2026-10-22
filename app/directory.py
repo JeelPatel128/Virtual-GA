@@ -34,6 +34,41 @@ EXTENSION_RE = re.compile(r"\b(extension|ext\.?|phone\s*number|office\s*number)\
 EMAIL_RE = re.compile(r"\bemail\b", re.I)
 PRONOUN_RE = re.compile(r"\b(he|she|him|her|his|hers|they|them|their)\b", re.I)
 
+# Common English words that are ALSO plausible first/last names in the real directory data.
+# Checked every first_name/last_name in the actual ssb_directory.csv against this risk: "an",
+# "oh", "ko", "sun", "park", "frank", "kim", "lee", "han", "diamond", "ryan", "wilson", and
+# "murphy" are all real names in our data, not hypothetical. A bare single-word match on one
+# of these must not be accepted on its own - length alone is too blunt a signal ("Jose", a
+# real alias with no English-word meaning, is also 4 characters and must still resolve from
+# nothing but itself), so this is an explicit word list, not a length cutoff.
+COMMON_WORDS = set("""an oh ko sun park frank kim lee han diamond ryan wilson murphy may
+will bill grace hope faith rose june mark victor bud hall young long short field lane stone
+brooks bell gray grey white black brown green king page cook baker carter mason potter
+taylor smith miller turner walker bond forest ford lake ray rain snow storm sky star moon
+summer winter spring autumn holly ivy lily daisy art bear fox wolf""".split())
+
+PERSON_INTENT_PATTERNS = [
+    r"\bwhere(?:'s| is)\s+{w}\b",
+    r"\bis\s+{w}\s+(?:in|here|around|available)\b",
+    r"\bfind\s+{w}\b",
+    r"{w}'?s\s*(?:office|room|extension|email)\b",
+    r"\blooking for\s+{w}\b",
+]
+
+
+def _is_risky_word(word: str) -> bool:
+    return word in COMMON_WORDS
+
+
+def _has_person_intent_near(text: str, word: str) -> bool:
+    """A risky common-word match only counts when the text's own phrasing points at a
+    person specifically for THAT word (not just a pattern appearing anywhere in the
+    sentence - "oh where is the printer" contains "where is" but not "where is oh", so it
+    must not count as support for treating "oh" as a name)."""
+    t = text.lower()
+    w = re.escape(word)
+    return any(re.search(p.format(w=w), t) for p in PERSON_INTENT_PATTERNS)
+
 
 def get_show_extensions(db) -> bool:
     return (kv_get(db, "show_extensions") or "").strip().lower() in ("1", "true", "yes", "on")
@@ -193,6 +228,9 @@ def _name_candidates(db, text: str) -> list[tuple["Person", float, str]]:
     if not people:
         return []
     for phrase in _ngrams(words):
+        if " " not in phrase and _is_risky_word(phrase) and not (
+                TITLE_WORD_RE.search(text) or _has_person_intent_near(text, phrase)):
+            continue  # a bare common-word name needs title/phrase support, not just itself
         hits = []
         for p in people:
             best, best_str = 0.0, ""

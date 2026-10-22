@@ -78,23 +78,40 @@ class Message(Base):
 
 
 class Ticket(Base):
-    """A handoff to a human GA."""
+    """One owned, deadlined, GA-team-only item: a visitor handoff, a message for a
+    specific person, or a task request. status: new -> claimed -> in_progress ->
+    done | cancelled, unified across all three kinds (see app/tickets.py)."""
     __tablename__ = "tickets"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
     question: Mapped[str] = mapped_column(Text)
-    # waiting -> on_the_way | follow_up | replied -> resolved
-    status: Mapped[str] = mapped_column(String(20), default="waiting", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="waiting", index=True)  # cut over to new/claimed/in_progress/done/cancelled in the status-model commit
     on_shift: Mapped[list] = mapped_column(JSON, default=list)  # GA names on shift when created
     responded_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     first_response_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     escalated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    # Migrated onto the existing table, see _ensure_columns. kind: visitor | message.
+    # Migrated onto the existing table, see _ensure_columns. kind: visitor | message | task.
     kind: Mapped[str] = mapped_column(String(20), default="visitor")
     recipient_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # legacy, superseded by next_deadline
+    # Reliability pack: ownership, deadline, and reminder-ladder state (migrated in).
+    owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    owner_history: Mapped[list] = mapped_column(JSON, default=list)
+    activity: Mapped[str | None] = mapped_column(String(20), nullable=True)  # on_the_way | busy | replied
+    next_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_reminder_step: Mapped[int] = mapped_column(Integer, default=0)
+    snooze_count: Mapped[int] = mapped_column(Integer, default=0)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # task kind only
+    cancelled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {type, details, copies, pickup_location}
+    file_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    file_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    requester_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class QueryLog(Base):
@@ -161,7 +178,9 @@ class EmailCandidate(Base):
 
 # Columns added to tables that already exist in production after this feature shipped.
 # Base.metadata.create_all() never alters an existing table, so each entry here is checked
-# and added individually on every startup (cheap, idempotent).
+# and added individually on every startup (cheap, idempotent). sql_type is either one
+# portable name (works unchanged on SQLite and Postgres) or a {dialect: name} dict for the
+# rare type that isn't spelled the same on both (e.g. binary data: BLOB vs BYTEA).
 _MIGRATIONS = [
     ("sessions", "last_person_id", "INTEGER"),
     ("sessions", "pending_query", "TEXT"),
@@ -169,6 +188,22 @@ _MIGRATIONS = [
     ("tickets", "kind", "TEXT"),
     ("tickets", "recipient_person_id", "INTEGER"),
     ("tickets", "deadline_at", "TIMESTAMP"),
+    # Reliability pack
+    ("tickets", "owner", "TEXT"),
+    ("tickets", "owner_history", "JSON"),
+    ("tickets", "activity", "TEXT"),
+    ("tickets", "next_deadline", "TIMESTAMP"),
+    ("tickets", "last_reminder_step", "INTEGER"),
+    ("tickets", "snooze_count", "INTEGER"),
+    ("tickets", "due_at", "TIMESTAMP"),
+    ("tickets", "cancelled_reason", "TEXT"),
+    ("tickets", "task", "JSON"),
+    ("tickets", "file_name", "TEXT"),
+    ("tickets", "file_mime", "TEXT"),
+    ("tickets", "file_bytes", {"sqlite": "BLOB", "postgresql": "BYTEA"}),
+    ("tickets", "requester_email", "TEXT"),
+    ("tickets", "confirmed", "BOOLEAN"),
+    ("tickets", "confirmed_at", "TIMESTAMP"),
 ]
 
 
@@ -187,7 +222,10 @@ def _ensure_columns(eng=None) -> None:
     a throwaway engine without touching the app's real one."""
     eng = eng or engine
     with eng.begin() as conn:
+        dialect = conn.engine.dialect.name
         for table, column, sql_type in _MIGRATIONS:
+            if isinstance(sql_type, dict):
+                sql_type = sql_type.get(dialect, next(iter(sql_type.values())))
             if column not in _existing_columns(conn, table):
                 conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 

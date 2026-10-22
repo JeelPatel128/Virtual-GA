@@ -335,6 +335,47 @@ def test_shift_end_headsup_and_conditional_reassignment():
     print("shift-end heads-up / conditional reassignment test passed")
 
 
+def test_shift_start_first_tick_sends_nothing_then_detects_new_shift():
+    with TestClient(app) as c:
+        db = SessionLocal()
+        from app.db import kv_get as db_kv_get
+
+        # first tick ever for this snapshot key: no cards, just save the baseline -
+        # otherwise every GA already on shift at deploy time would get a false
+        # "you just started" card
+        assert db_kv_get(db, "on_shift_snapshot") is None, "test must start with no snapshot"
+        teams.sent_cards.clear()
+        fired = tickets.check_shift_starts(db)
+        assert fired == 0, "the very first tick must send no shift-start cards"
+        assert len(teams.sent_cards) == 0
+        assert db_kv_get(db, "on_shift_snapshot") is not None, "baseline must now be saved"
+
+        # a GA who wasn't on the previous snapshot but is now on shift gets a card
+        write_ics([
+            ("Jeel Patel - Front Desk", now - timedelta(hours=1), now + timedelta(hours=2)),
+            ("Desk: Two", now - timedelta(hours=1), now + timedelta(hours=2)),
+            ("GA Three - Front Desk", now - timedelta(minutes=1), now + timedelta(hours=1)),
+        ])
+        teams.sent_cards.clear()
+        fired = tickets.check_shift_starts(db)
+        assert fired == 1, fired
+        card = teams.sent_cards[-1]
+        assert title(card) == "Shift starting: here's what's open"
+        assert mentions(card) == ["three@stevens.edu"]
+
+        # calling again with the same on-shift set sends nothing more
+        teams.sent_cards.clear()
+        tickets.check_shift_starts(db)
+        assert len(teams.sent_cards) == 0, "must not re-notify a GA already on the snapshot"
+        db.close()
+        write_ics([
+            ("Jeel Patel - Front Desk", now - timedelta(hours=1), now + timedelta(hours=2)),
+            ("Desk: Two", now - timedelta(hours=1), now + timedelta(hours=2)),
+            ("GA Three - Front Desk", now + timedelta(hours=3), now + timedelta(hours=5)),
+        ])
+    print("shift-start detection test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -1048,6 +1089,7 @@ if __name__ == "__main__":
     test_structured_snooze_and_third_snooze_auto_escalates()
     test_reminder_ladder_catchup_offshift_and_autoclaim()
     test_shift_end_headsup_and_conditional_reassignment()
+    test_shift_start_first_tick_sends_nothing_then_detects_new_shift()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

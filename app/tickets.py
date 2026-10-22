@@ -1,6 +1,7 @@
 """Handoffs, GA responses, 5-minute escalation to the lead, the daily digest and data cleanup."""
 import hashlib
 import hmac
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -464,9 +465,41 @@ def check_shift_ends(db) -> int:
     return acted
 
 
+def check_shift_starts(db) -> int:
+    """A GA newly appearing in on_shift_now() since the last tick (diffed against a KV
+    snapshot) gets a start-of-shift card: what's currently open, owned by whom, and its
+    deadline. The very first tick this app has ever run (no snapshot yet) only saves the
+    baseline and sends nothing - otherwise every GA already on shift at deploy time would
+    get a false "you just started" card. (The "Today at SSB" reminder this card is meant
+    to also nudge about doesn't exist yet - added when that note feature lands.)"""
+    current = {g.name for g in schedule.on_shift_now()}
+    stored = kv_get(db, "on_shift_snapshot")
+    kv_set(db, "on_shift_snapshot", json.dumps(sorted(current)))
+    db.commit()
+    if stored is None:
+        return 0
+    newly_started = current - set(json.loads(stored))
+    if not newly_started:
+        return 0
+    open_tickets = db.scalars(select(Ticket).where(Ticket.status.in_(OPEN_STATUSES))).all()
+    lines = [(f"#{t.id}", f"{t.owner or 'Unclaimed'} - {t.question[:50]}") for t in open_tickets[:10]]
+    sent = 0
+    for ga_name in newly_started:
+        ga = _ga_by_name(ga_name)
+        teams.post(teams.build_card(
+            title="Shift starting: here's what's open",
+            mention=[ga] if ga else [],
+            lines=lines or [("Nothing open", "Quiet desk")],
+            buttons=[("Open GA console", f"{settings.PUBLIC_BASE_URL}/ga")],
+        ))
+        sent += 1
+    return sent
+
+
 def tick(db) -> dict:
     result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0}
     result["shift_ends_handled"] = check_shift_ends(db)
+    result["shift_starts_handled"] = check_shift_starts(db)
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
     if now.hour >= settings.DIGEST_HOUR and kv_get(db, "digest_date") != today:

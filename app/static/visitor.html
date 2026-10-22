@@ -91,6 +91,16 @@ function addMsg(m) {
     const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = "Yes, get a GA";
     b.onclick = () => openSheet(); el.appendChild(b);
   }
+  (meta.choices || []).forEach(choice => {
+    const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = choice.label;
+    b.onclick = async () => {
+      b.disabled = true;
+      try { await api(`/api/session/${sid}/resolve_person`, { method: "POST", body: JSON.stringify({ person_id: choice.id }) }); }
+      catch (err) { addMsg({ sender: "system", text: err.message }); }
+      await poll();
+    };
+    el.appendChild(b);
+  });
   log.appendChild(el);
   log.scrollTop = log.scrollHeight;
 }

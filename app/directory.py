@@ -267,7 +267,27 @@ def resolve(db, sess, text: str) -> dict | None:
     tied = [c for c in strong if top_score - c[1] <= TIE_MARGIN]
     unique = {c[0].id: c[0] for c in tied}
     if len(unique) > 1:
-        names = ", ".join(f"{p.name} ({p.title})" for p in unique.values())
-        return {"answer": f"Did you mean {names}? Tell me which one.", "meta": {}}
+        sess.pending_query = text
+        sess.pending_choices = list(unique.keys())
+        choices = [{"id": p.id, "label": f"{p.name} ({p.title})"} for p in unique.values()]
+        names = ", ".join(c["label"] for c in choices)
+        return {"answer": f"Did you mean {names}? Tap one below.", "meta": {"choices": choices}}
 
-    return _format_person_answer(next(iter(unique.values())), text, get_show_extensions(db))
+    person = next(iter(unique.values()))
+    sess.last_person_id = person.id
+    return _format_person_answer(person, text, get_show_extensions(db))
+
+
+def resolve_choice(db, sess, person_id: int) -> dict:
+    """Handles a visitor tapping one of the "Did you mean ...?" buttons."""
+    offered = sess.pending_choices or []
+    query = sess.pending_query or ""
+    sess.pending_query = None
+    sess.pending_choices = None
+    if person_id not in offered:
+        return {"answer": "That wasn't one of the options I offered. Could you ask again?", "meta": {}}
+    person = db.get(Person, person_id)
+    if person is None or not person.active:
+        return _not_found_answer()
+    sess.last_person_id = person.id
+    return _format_person_answer(person, query, get_show_extensions(db))

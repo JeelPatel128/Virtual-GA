@@ -248,6 +248,33 @@ def test_extension_hidden_unless_admin_enables_it():
     print("extension gating test passed")
 
 
+def test_disambiguation_buttons():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        last = _ask_text(c, sid, "Chen")
+        choices = last["meta"].get("choices") or []
+        names = {ch["label"].split(" (")[0] for ch in choices}
+        assert names == {"Jing Chen", "Violet Chen"}, last
+
+        # a stale/unlisted id must not be silently answered
+        bad_id = max(ch["id"] for ch in choices) + 999
+        r = c.post(f"/api/session/{sid}/resolve_person", json={"person_id": bad_id})
+        assert r.status_code == 200
+        last = c.get(f"/api/session/{sid}/messages").json()["messages"][-1]
+        assert "wasn't one of the options" in last["text"], last
+
+        # re-ask and actually pick one this time
+        last = _ask_text(c, sid, "Chen")
+        choices = last["meta"]["choices"]
+        jing = next(ch for ch in choices if ch["label"].startswith("Jing Chen"))
+        c.post(f"/api/session/{sid}/resolve_person", json={"person_id": jing["id"]})
+        last = c.get(f"/api/session/{sid}/messages").json()["messages"][-1]
+        assert "Jing Chen" in last["text"], last
+    print("disambiguation buttons test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -405,4 +432,5 @@ if __name__ == "__main__":
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()
+    test_disambiguation_buttons()
     test_full_flow()

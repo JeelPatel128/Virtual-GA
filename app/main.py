@@ -125,6 +125,10 @@ class ContactIn(BaseModel):
     consent: bool
 
 
+class ResolvePersonIn(BaseModel):
+    person_id: int
+
+
 def _session(db, sid: str) -> ChatSession:
     s = db.get(ChatSession, sid)
     if not s:
@@ -221,6 +225,15 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
     db.add(QueryLog(session_id=sess.id, question=text, confident=result["confident"]))
     db.commit()
     return {"relayed": False}
+
+
+@app.post("/api/session/{sid}/resolve_person")
+def resolve_person(sid: str, body: ResolvePersonIn, db=Depends(get_db)):
+    sess = _session(db, sid)
+    result = directory.resolve_choice(db, sess, body.person_id)
+    tickets.say(db, sid, "bot", result["answer"], meta=result.get("meta", {}))
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/session/{sid}/handoff")

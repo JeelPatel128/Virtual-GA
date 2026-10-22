@@ -552,6 +552,60 @@ def test_email_candidate_review_flow():
     print("email candidate review flow test passed")
 
 
+def test_find_emails_script_pure_functions():
+    """tools/find_emails.py is a standalone script with no web app import - these are
+    offline tests of its parsing/decoding logic only. No network calls."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import find_emails
+
+    def cf_encode(email: str, key: int = 0x2a) -> str:
+        data = bytes([key]) + bytes(b ^ key for b in email.encode())
+        return data.hex()
+
+    hexval = cf_encode("test.person@stevens.edu")
+    assert find_emails.cf_decode(hexval) == "test.person@stevens.edu"
+
+    html_attr = f'<span class="__cf_email__" data-cfemail="{hexval}">[email protected]</span>'
+    assert find_emails.extract_emails(html_attr) == ["test.person@stevens.edu"]
+
+    html_href = f'<a href="/cdn-cgi/l/email-protection#{hexval}">[email protected]</a>'
+    assert find_emails.extract_emails(html_href) == ["test.person@stevens.edu"]
+
+    # a non-stevens.edu address must never be returned, even if decodable
+    other_hex = cf_encode("someone@gmail.com")
+    assert find_emails.extract_emails(f'<span data-cfemail="{other_hex}"></span>') == []
+
+    # a synthetic faculty card, matching the real site's structure
+    card_html = (
+        '<div class="faculty-card_cc--faculty-card__j3sBO"><div class="faculty-card_c--faculty-card__y49jx">'
+        '<div class="faculty-card_name-title__WxAmJ"><h3><a href="/profile/jtest">Jamie Test</a></h3>'
+        '<h4>Assistant Professor</h4></div>'
+        '<div class="faculty-card_contact__w6Wob">'
+        '<div class="faculty-card_contact-office__sswX5">Babbio Center 500</div>'
+        f'<div class="faculty-card_contact-email__pxACB"><a href="/cdn-cgi/l/email-protection#{hexval}">'
+        '[email protected]</a></div>'
+        '<div class="faculty-card_contact-phone__DzSNI"><a href="tel:+12015551234">(201) 555-1234</a></div>'
+        '</div></div></div>'
+    )
+    cards = find_emails.parse_faculty_listing(card_html)
+    assert len(cards) == 1, cards
+    card = cards[0]
+    assert card["name"] == "Jamie Test"
+    assert card["office"] == "Babbio Center 500"
+    assert card["extension"] == "1234"
+    assert card["email"] == "test.person@stevens.edu"
+
+    # mismatch detection: directory says a different room/extension than the page
+    fake_person = {"room": "600", "extension": "9999"}
+    mismatches = []
+    if card["office"] and fake_person["room"] not in card["office"]:
+        mismatches.append("office")
+    if card["extension"] != fake_person["extension"]:
+        mismatches.append("extension")
+    assert mismatches == ["office", "extension"]
+    print("find_emails.py pure-function tests passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -719,4 +773,5 @@ if __name__ == "__main__":
     test_ga_directory_search()
     test_admin_status_reports_directory_counts()
     test_email_candidate_review_flow()
+    test_find_emails_script_pure_functions()
     test_full_flow()

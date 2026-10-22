@@ -198,6 +198,8 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
 
     if action == "on_my_way":
         t.status, t.activity = "in_progress", "on_the_way"
+        t.next_deadline = utcnow() + timedelta(minutes=(minutes or 0) + 5)
+        t.last_reminder_step = 0
         eta = f" in about {minutes} minutes" if minutes else " shortly"
         say(db, t.session_id, "system", f"{ga_first} is on the way to the front desk and will be with you{eta}.")
     elif action == "busy":
@@ -217,6 +219,31 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
                                         "You can keep asking me questions anytime.")
     else:
         raise ValueError(f"Unknown action {action}")
+    db.commit()
+
+
+def confirm_reached(db, t: Ticket, reached: bool) -> None:
+    """The visitor's answer to "did a GA reach you?" once an on-my-way ETA has passed.
+    Yes closes the ticket; No escalates to the lead immediately rather than waiting for
+    the reminder ladder to eventually catch up on the now-overdue deadline."""
+    t.confirmed, t.confirmed_at = reached, utcnow()
+    if reached:
+        t.status = "done"
+        t.resolved_at = utcnow()
+        say(db, t.session_id, "system", "Glad they found you! This request is now marked as resolved.")
+    else:
+        t.next_deadline = utcnow()
+        t.last_reminder_step = 0
+        lead = lead_ga()
+        teams.post(teams.build_card(
+            title="Visitor says the GA never reached them",
+            mention=[lead] if lead else [],
+            body_text=f"“{t.question}”",
+            lines=[("Ticket", f"#{t.id}")],
+            buttons=[("Open and respond", ticket_url(t.id))],
+            style="urgent",
+        ))
+        say(db, t.session_id, "system", "Sorry about that. I've flagged this to the lead GA right away.")
     db.commit()
 
 

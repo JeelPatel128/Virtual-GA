@@ -62,7 +62,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const log = $("log");
-let sid = null, lastId = 0, ticket = null, lastVisitorQ = "", polling = null, askedPhone = false;
+let sid = null, lastId = 0, ticket = null, lastVisitorQ = "", polling = null, askedPhone = false, askedReached = false;
 
 function store(k, v) { try { v === undefined ? localStorage.getItem(k) : localStorage.setItem(k, v); } catch (e) {} }
 function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
@@ -143,6 +143,24 @@ function maybeAskPhone(hasPhone) {
   log.appendChild(box); log.scrollTop = log.scrollHeight;
 }
 
+function maybeAskReached() {
+  if (askedReached || !ticket || !ticket.confirm_prompt) return;
+  askedReached = true;
+  const box = document.createElement("div"); box.className = "msg system";
+  box.appendChild(document.createTextNode("Did a GA reach you?"));
+  const yes = document.createElement("button"); yes.className = "btn small offer"; yes.textContent = "Yes";
+  const no = document.createElement("button"); no.className = "btn small offer quiet"; no.textContent = "No";
+  const answer = async (reached) => {
+    yes.disabled = no.disabled = true;
+    try { await api(`/api/session/${sid}/confirm_reached`, { method: "POST", body: JSON.stringify({ reached }) }); }
+    catch (err) { addMsg({ sender: "system", text: err.message }); }
+    await poll();
+  };
+  yes.onclick = () => answer(true); no.onclick = () => answer(false);
+  box.appendChild(yes); box.appendChild(no);
+  log.appendChild(box); log.scrollTop = log.scrollHeight;
+}
+
 async function poll() {
   if (!sid) return;
   try {
@@ -152,6 +170,7 @@ async function poll() {
     ticket = d.ticket; showStatus();
     const nowBusy = ticket && ticket.status === "in_progress" && ticket.activity === "busy";
     if (nowBusy && !prevBusy) maybeAskPhone(!!load("vga_phone"));
+    maybeAskReached();
   } catch (e) {
     if (String(e.message).includes("expired")) { store("vga_sid", ""); start(true); }
   }

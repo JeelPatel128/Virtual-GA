@@ -123,6 +123,48 @@ def test_claim_is_atomic_only_one_wins():
     print("claim atomicity test passed")
 
 
+def test_on_my_way_deadline_and_confirmation():
+    with TestClient(app) as c:
+        sid = c.post("/api/session").json()["session_id"]
+        tid = c.post(f"/api/session/{sid}/handoff", json={"name": "Alex", "question": "help"}).json()["ticket_id"]
+        GA = {"X-GA-Key": "gakey"}
+
+        r = c.post(f"/api/ga/ticket/{tid}/action", headers=GA, json={"ga_name": "GA Two", "action": "on_my_way", "minutes": 5})
+        assert r.status_code == 200
+
+        from sqlalchemy import select
+        from app.db import Ticket as _Ticket, utcnow as db_utcnow
+        db = SessionLocal()
+        row = db.get(_Ticket, tid)
+        minutes_out = (row.next_deadline - db_utcnow()).total_seconds() / 60
+        assert 9.9 <= minutes_out <= 10.1, minutes_out  # ETA (5) + 5 min buffer
+
+        # before the deadline, no confirmation prompt
+        m = c.get(f"/api/session/{sid}/messages").json()
+        assert m["ticket"]["confirm_prompt"] is False, m["ticket"]
+
+        # once the deadline has passed, the visitor is asked
+        row.next_deadline = db_utcnow() - timedelta(minutes=1)
+        db.commit()
+        m = c.get(f"/api/session/{sid}/messages").json()
+        assert m["ticket"]["confirm_prompt"] is True, m["ticket"]
+
+        # "No" escalates right away and resets the deadline to now
+        teams.sent_cards.clear()
+        r = c.post(f"/api/session/{sid}/confirm_reached", json={"reached": False})
+        assert r.status_code == 200
+        esc = teams.sent_cards[-1]
+        assert title(esc) == "Visitor says the GA never reached them"
+        assert mentions(esc) == ["jp@stevens.edu"]
+        m = c.get(f"/api/session/{sid}/messages").json()
+        assert m["ticket"]["confirm_prompt"] is False, "must not re-prompt after an answer"
+        assert m["ticket"]["status"] == "in_progress"
+
+        db.delete(db.get(_Ticket, tid))
+        db.commit(); db.close()
+    print("on-my-way deadline / confirmation test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -828,6 +870,7 @@ def test_full_flow():
 if __name__ == "__main__":
     test_migration_adds_columns_to_old_tables()
     test_claim_is_atomic_only_one_wins()
+    test_on_my_way_deadline_and_confirmation()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

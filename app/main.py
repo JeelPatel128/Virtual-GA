@@ -130,6 +130,10 @@ class ResolvePersonIn(BaseModel):
     person_id: int
 
 
+class ConfirmReachedIn(BaseModel):
+    reached: bool
+
+
 def _session(db, sid: str) -> ChatSession:
     s = db.get(ChatSession, sid)
     if not s:
@@ -166,8 +170,11 @@ def get_messages(sid: str, after: int = 0, db=Depends(get_db)):
     _session(db, sid)
     msgs = db.scalars(select(Message).where(Message.session_id == sid, Message.id > after).order_by(Message.id)).all()
     t = tickets.open_ticket_for(db, sid)
+    confirm_prompt = bool(t and t.status == "in_progress" and t.activity == "on_the_way"
+                         and t.next_deadline and t.next_deadline <= utcnow() and t.confirmed is None)
     return {"messages": [_msg_json(m) for m in msgs],
-            "ticket": {"id": t.id, "status": t.status, "activity": t.activity} if t else None}
+            "ticket": {"id": t.id, "status": t.status, "activity": t.activity,
+                      "confirm_prompt": confirm_prompt} if t else None}
 
 
 @app.post("/api/session/{sid}/ask")
@@ -234,6 +241,16 @@ def resolve_person(sid: str, body: ResolvePersonIn, db=Depends(get_db)):
     result = directory.resolve_choice(db, sess, body.person_id)
     tickets.say(db, sid, "bot", result["answer"], meta=result.get("meta", {}))
     db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/session/{sid}/confirm_reached")
+def confirm_reached(sid: str, body: ConfirmReachedIn, db=Depends(get_db)):
+    _session(db, sid)
+    t = tickets.open_ticket_for(db, sid)
+    if not t:
+        raise HTTPException(404, "No open ticket for this session")
+    tickets.confirm_reached(db, t, body.reached)
     return {"ok": True}
 
 

@@ -60,6 +60,10 @@ class ChatSession(Base):
     visitor_phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     phone_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # Directory resolver memory (migrated onto the existing table, see _ensure_columns).
+    last_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pending_query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_choices: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class Message(Base):
@@ -87,6 +91,10 @@ class Ticket(Base):
     first_response_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     escalated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Migrated onto the existing table, see _ensure_columns. kind: visitor | message.
+    kind: Mapped[str] = mapped_column(String(20), default="visitor")
+    recipient_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class QueryLog(Base):
@@ -105,8 +113,88 @@ class KV(Base):
     value: Mapped[str] = mapped_column(Text)
 
 
+class Person(Base):
+    """One SSB directory entry, imported (upserted) from an admin-uploaded CSV."""
+    __tablename__ = "people"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    first_name: Mapped[str] = mapped_column(String(100), default="")
+    last_name: Mapped[str] = mapped_column(String(100), default="")
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    type: Mapped[str] = mapped_column(String(30), default="")
+    building: Mapped[str] = mapped_column(String(50), default="")
+    room: Mapped[str] = mapped_column(String(30), default="")
+    floor: Mapped[str] = mapped_column(String(10), default="")
+    directions: Mapped[str] = mapped_column(Text, default="")
+    office_hours: Mapped[str] = mapped_column(String(200), default="")
+    extension: Mapped[str] = mapped_column(String(20), default="")
+    email: Mapped[str] = mapped_column(String(200), default="")
+    roles: Mapped[str] = mapped_column(Text, default="")
+    route_topics_here: Mapped[bool] = mapped_column(Boolean, default=True)
+    show_publicly: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_verified: Mapped[str] = mapped_column(String(20), default="")
+    review_notes: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Room(Base):
+    """One place on the babbio4_rooms.csv map (lounge, washroom, a specific room, ...)."""
+    __tablename__ = "rooms"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    place: Mapped[str] = mapped_column(String(100), index=True)
+    directions_from_front_desk: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class EmailCandidate(Base):
+    """A proposed email from tools/find_emails.py, awaiting admin approval."""
+    __tablename__ = "email_candidates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    email: Mapped[str] = mapped_column(String(200))
+    confidence: Mapped[str] = mapped_column(String(10))  # high | medium | low
+    source_url: Mapped[str] = mapped_column(String(500), default="")
+    status: Mapped[str] = mapped_column(String(10), default="pending")  # pending | approved | rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+# Columns added to tables that already exist in production after this feature shipped.
+# Base.metadata.create_all() never alters an existing table, so each entry here is checked
+# and added individually on every startup (cheap, idempotent).
+_MIGRATIONS = [
+    ("sessions", "last_person_id", "INTEGER"),
+    ("sessions", "pending_query", "TEXT"),
+    ("sessions", "pending_choices", "JSON"),
+    ("tickets", "kind", "TEXT"),
+    ("tickets", "recipient_person_id", "INTEGER"),
+    ("tickets", "deadline_at", "TIMESTAMP"),
+]
+
+
+def _existing_columns(conn, table: str) -> set[str]:
+    if conn.engine.dialect.name == "sqlite":
+        return {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()}
+    rows = conn.exec_driver_sql(
+        f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'").fetchall()
+    return {row[0] for row in rows}
+
+
+def _ensure_columns(eng=None) -> None:
+    """Base.metadata.create_all() never alters a table that already exists (true for
+    'sessions'/'tickets' in production), so each migration entry is added by hand, once,
+    checked idempotently every startup. `eng` is overridable so this can be tested against
+    a throwaway engine without touching the app's real one."""
+    eng = eng or engine
+    with eng.begin() as conn:
+        for table, column, sql_type in _MIGRATIONS:
+            if column not in _existing_columns(conn, table):
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    _ensure_columns()
 
 
 def kv_get(db, key: str) -> str | None:

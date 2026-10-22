@@ -48,11 +48,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app import db as db_module  # noqa: E402
 from app import teams, tickets  # noqa: E402
 from app.db import SessionLocal, Ticket  # noqa: E402
 from app.main import app  # noqa: E402
 
 A = {"X-Admin-Key": "adminpw"}
+
+
+def test_migration_adds_columns_to_old_tables():
+    """Simulates the real prod situation: 'sessions'/'tickets' already exist (old shape,
+    pre-dating the directory feature) and must gain the new columns without create_all,
+    which never alters an existing table."""
+    import sqlite3
+    from sqlalchemy import create_engine as _create_engine
+
+    path = TMP / "old_schema.db"
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, visitor_name TEXT, visitor_phone TEXT,
+            phone_consent BOOLEAN, created_at TIMESTAMP
+        );
+        CREATE TABLE tickets (
+            id INTEGER PRIMARY KEY, session_id TEXT, question TEXT, status TEXT,
+            on_shift TEXT, responded_by TEXT, created_at TIMESTAMP,
+            first_response_at TIMESTAMP, escalated_at TIMESTAMP, resolved_at TIMESTAMP
+        );
+    """)
+    con.commit(); con.close()
+
+    eng = _create_engine(f"sqlite:///{path}")
+    db_module._ensure_columns(eng=eng)
+
+    with eng.connect() as conn:
+        session_cols = db_module._existing_columns(conn, "sessions")
+        ticket_cols = db_module._existing_columns(conn, "tickets")
+    assert {"last_person_id", "pending_query", "pending_choices"} <= session_cols
+    assert {"kind", "recipient_person_id", "deadline_at"} <= ticket_cols
+    eng.dispose()
 
 
 def mentions(card):
@@ -216,4 +250,5 @@ def test_full_flow():
 
 
 if __name__ == "__main__":
+    test_migration_adds_columns_to_old_tables()
     test_full_flow()

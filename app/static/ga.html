@@ -120,9 +120,18 @@ async function ticketView(force) {
         <button class="btn" data-a="on_my_way" data-m="2">On my way (2 min)</button>
         <button class="btn" data-a="on_my_way" data-m="5">On my way (5 min)</button>
         <button class="btn ghost" data-a="on_my_way" data-m="10">10 min</button>
-        <button class="btn quiet" data-a="busy">Busy, I'll follow up</button>
         <button class="btn quiet" data-a="resolve">Mark resolved</button>
-      </div>` : ""}
+      </div>
+      <form id="snoozeForm" class="btns" style="margin-top:8px">
+        <select id="snoozeUntil" aria-label="Follow up in">
+          <option value="30min">Busy - follow up in 30 min</option>
+          <option value="2h">Busy - follow up in 2 hours</option>
+          <option value="end_of_shift">Busy - follow up end of my shift</option>
+          <option value="tomorrow_10am">Busy - follow up tomorrow 10 AM</option>
+        </select>
+        <input id="snoozeReason" placeholder="Reason (required)" maxlength="500" required>
+        <button class="btn quiet">Snooze</button>
+      </form>` : ""}
       ${open && !mine ? `<p class="hint">Owned by ${esc(t.owner)} - only they or the lead can act on this.</p>` : ""}
     </div>
     <div class="card">
@@ -147,6 +156,13 @@ async function ticketView(force) {
   if ($("replyForm")) {
     $("replyText").value = typing;
     $("replyForm").onsubmit = (e) => { e.preventDefault(); const text = $("replyText").value.trim(); if (text) { $("replyText").value = ""; act("reply", { text }); } };
+  }
+  if ($("snoozeForm")) {
+    $("snoozeForm").onsubmit = (e) => {
+      e.preventDefault();
+      const reason = $("snoozeReason").value.trim(); if (!reason) return;
+      act("busy", { snooze_until: $("snoozeUntil").value, reason });
+    };
   }
 }
 

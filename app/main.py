@@ -313,6 +313,8 @@ class ActionIn(BaseModel):
     action: str
     minutes: int | None = Field(None, ge=1, le=60)
     text: str | None = Field(None, max_length=2000)
+    snooze_until: str | None = None
+    reason: str | None = Field(None, max_length=500)
 
 
 class ClaimIn(BaseModel):
@@ -384,7 +386,8 @@ def ga_ticket_action(ticket_id: int, body: ActionIn, db=Depends(get_db)):
     if t.status == "done":
         raise HTTPException(409, "Already resolved")
     try:
-        tickets.ga_action(db, t, body.ga_name.strip(), body.action, body.minutes, body.text)
+        tickets.ga_action(db, t, body.ga_name.strip(), body.action, body.minutes, body.text,
+                         body.snooze_until, body.reason)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _ticket_json(db, t, True)

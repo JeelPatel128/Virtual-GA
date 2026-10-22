@@ -81,6 +81,23 @@ def current_shift_end(now: datetime | None = None) -> datetime | None:
     return max((s["end"] for s in active), default=None)
 
 
+def shift_end_for(ga_name: str, now: datetime | None = None) -> datetime | None:
+    """This specific GA's own shift end, for "snooze until end of my shift" - not just
+    the latest end among whoever else happens to also be on shift right now."""
+    now = now or datetime.now(TZ)
+    active = [s for s in shifts_between(now, now + timedelta(minutes=1)) if any(g.name == ga_name for g in s["gas"])]
+    return max((s["end"] for s in active), default=None)
+
+
+def next_shift_for(ga_name: str, now: datetime | None = None) -> dict | None:
+    """This GA's own next upcoming shift (for the shift-end conditional-reassignment
+    rule: an item due before their NEXT shift starts can't wait for them)."""
+    now = now or datetime.now(TZ)
+    upcoming = [s for s in shifts_between(now, now + timedelta(days=14))
+               if s["start"] > now and any(g.name == ga_name for g in s["gas"])]
+    return upcoming[0] if upcoming else None
+
+
 def status() -> dict:
     """For the admin page: is the calendar connected and what does today look like."""
     now = datetime.now(TZ)

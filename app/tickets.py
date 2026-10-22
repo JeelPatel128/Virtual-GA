@@ -177,7 +177,28 @@ def _is_lead(ga_name: str) -> bool:
     return bool(lead and lead.name == ga_name)
 
 
-def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = None, text: str | None = None) -> None:
+SNOOZE_OPTIONS = ("30min", "2h", "end_of_shift", "tomorrow_10am")
+SNOOZE_LABELS = {"30min": "30 minutes", "2h": "2 hours", "end_of_shift": "the end of their shift",
+                "tomorrow_10am": "tomorrow at 10 AM"}
+
+
+def _snooze_deadline(choice: str, ga_name: str) -> datetime:
+    now_local = datetime.now(TZ)
+    if choice == "30min":
+        return utcnow() + timedelta(minutes=30)
+    if choice == "2h":
+        return utcnow() + timedelta(hours=2)
+    if choice == "end_of_shift":
+        end = schedule.shift_end_for(ga_name, now_local)
+        return _to_naive_utc(end) if end else utcnow() + timedelta(hours=4)
+    if choice == "tomorrow_10am":
+        tomorrow = (now_local + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+        return _to_naive_utc(tomorrow)
+    raise ValueError(f"Unknown snooze option {choice!r}")
+
+
+def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = None, text: str | None = None,
+             snooze_until: str | None = None, reason: str | None = None) -> None:
     """Taking any action implies ownership: an unclaimed ticket is auto-claimed to
     whoever acts on it first (claim_ticket is still atomic, so a genuine race between
     two GAs both calling an action has the same single-winner guarantee as an explicit
@@ -203,10 +224,23 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
         eta = f" in about {minutes} minutes" if minutes else " shortly"
         say(db, t.session_id, "system", f"{ga_first} is on the way to the front desk and will be with you{eta}.")
     elif action == "busy":
+        if snooze_until not in SNOOZE_OPTIONS:
+            raise ValueError("Pick a follow-up time: 30 minutes, 2 hours, end of shift, or tomorrow 10 AM.")
+        if not reason or not reason.strip():
+            raise ValueError("A reason is required when snoozing.")
         t.status, t.activity = "in_progress", "busy"
+        t.next_deadline = _snooze_deadline(snooze_until, ga_name)
+        t.last_reminder_step = 0
+        t.snooze_count += 1
         how = "call you back at the number you left" if sess.visitor_phone else \
             "get back to you. Please leave a phone number below so they can reach you"
         say(db, t.session_id, "system", f"{ga_first} is tied up with something right now and will {how}.")
+        if t.snooze_count >= 3:
+            lead = lead_ga()
+            if lead and lead.name != t.owner:
+                reassign_ticket(db, t, lead.name, f"auto-reassigned after {t.snooze_count} snoozes")
+                say(db, t.session_id, "system",
+                    "This has been handed to the lead GA after being delayed a few times.")
     elif action == "reply":
         if not text or not text.strip():
             raise ValueError("Reply is empty.")

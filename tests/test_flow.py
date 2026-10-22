@@ -165,6 +165,55 @@ def test_on_my_way_deadline_and_confirmation():
     print("on-my-way deadline / confirmation test passed")
 
 
+def test_structured_snooze_and_third_snooze_auto_escalates():
+    with TestClient(app) as c:
+        sid = c.post("/api/session").json()["session_id"]
+        tid = c.post(f"/api/session/{sid}/handoff", json={"name": "Alex", "question": "help"}).json()["ticket_id"]
+        GA = {"X-GA-Key": "gakey"}
+
+        # no free-text "later": a missing/invalid snooze_until is rejected
+        r = c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+                  json={"ga_name": "GA Two", "action": "busy", "reason": "stuff"})
+        assert r.status_code == 400 and "follow-up time" in r.json()["detail"]
+
+        # a reason is required
+        r = c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+                  json={"ga_name": "GA Two", "action": "busy", "snooze_until": "30min"})
+        assert r.status_code == 400 and "reason is required" in r.json()["detail"]
+
+        r = c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+                  json={"ga_name": "GA Two", "action": "busy", "snooze_until": "30min", "reason": "meeting"})
+        assert r.status_code == 200
+
+        from sqlalchemy import select
+        from app.db import Ticket as _Ticket, utcnow as db_utcnow
+        db = SessionLocal()
+        row = db.get(_Ticket, tid)
+        minutes_out = (row.next_deadline - db_utcnow()).total_seconds() / 60
+        assert 29 <= minutes_out <= 31, minutes_out
+        assert row.snooze_count == 1 and row.owner == "GA Two"
+        db.close()
+
+        # 2nd snooze: still with GA Two, no reassignment yet
+        c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+              json={"ga_name": "GA Two", "action": "busy", "snooze_until": "2h", "reason": "still busy"})
+        db = SessionLocal()
+        row = db.get(_Ticket, tid)
+        assert row.snooze_count == 2 and row.owner == "GA Two"
+        db.close()
+
+        # 3rd snooze: auto-reassigned to the lead
+        c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+              json={"ga_name": "GA Two", "action": "busy", "snooze_until": "tomorrow_10am", "reason": "again"})
+        db = SessionLocal()
+        row = db.get(_Ticket, tid)
+        assert row.snooze_count == 3 and row.owner == "Jeel Patel", row.owner
+        assert row.owner_history[-1]["ga"] == "Jeel Patel" and "3" in row.owner_history[-1]["reason"]
+        db.delete(row)
+        db.commit(); db.close()
+    print("structured snooze / 3rd-snooze escalation test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -840,7 +889,8 @@ def test_full_flow():
 
         # GA says busy on ticket 2 -> visitor asked for a number, then adds it
         tok2 = tickets.ticket_token(tid2)
-        c.post(f"/api/ga/ticket/{tid2}/action?t={tok2}", json={"ga_name": "Jeel Patel", "action": "busy"})
+        c.post(f"/api/ga/ticket/{tid2}/action?t={tok2}",
+              json={"ga_name": "Jeel Patel", "action": "busy", "snooze_until": "30min", "reason": "in a meeting"})
         assert "leave a phone number" in c.get(f"/api/session/{sid2}/messages").json()["messages"][-1]["text"]
         assert c.post(f"/api/session/{sid2}/contact", json={"phone": "201 555 0199", "consent": False}).status_code == 400
         assert c.post(f"/api/session/{sid2}/contact", json={"phone": "201 555 0199", "consent": True}).status_code == 200
@@ -871,6 +921,7 @@ if __name__ == "__main__":
     test_migration_adds_columns_to_old_tables()
     test_claim_is_atomic_only_one_wins()
     test_on_my_way_deadline_and_confirmation()
+    test_structured_snooze_and_third_snooze_auto_escalates()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

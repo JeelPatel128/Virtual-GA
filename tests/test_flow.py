@@ -377,6 +377,48 @@ def test_shift_start_first_tick_sends_nothing_then_detects_new_shift():
     print("shift-start detection test passed")
 
 
+def test_storage_module_degrades_and_builds_correct_requests():
+    """app/storage.py: offline tests only, no real network calls. Mocks requests.* to
+    check it builds the right calls, and confirms it degrades gracefully (returns None /
+    no-ops) when Supabase isn't configured - exactly the real state of this repo's .env
+    today (SUPABASE_URL/SUPABASE_SERVICE_KEY are unset)."""
+    from unittest.mock import patch, MagicMock
+    from app import storage
+
+    assert storage.enabled() is False, "must reflect the real (unset) settings"
+    assert storage.upload(b"data", "application/pdf") is None
+    assert storage.signed_url("some/path") is None
+    storage.delete("some/path")  # no-op, must not raise
+
+    with patch.object(storage.settings, "SUPABASE_URL", "https://test.supabase.co"), \
+         patch.object(storage.settings, "SUPABASE_SERVICE_KEY", "test-key"):
+        assert storage.enabled() is True
+
+        with patch("app.storage.requests.post") as mock_post:
+            mock_post.return_value = MagicMock(status_code=200)
+            path = storage.upload(b"filedata", "application/pdf")
+            assert path is not None
+            call = mock_post.call_args
+            assert f"/storage/v1/object/{storage.BUCKET}/{path}" in call.args[0]
+            assert call.kwargs["headers"]["Authorization"] == "Bearer test-key"
+            assert call.kwargs["data"] == b"filedata"
+
+        with patch("app.storage.requests.post") as mock_post:
+            mock_post.return_value = MagicMock(status_code=200, json=lambda: {"signedURL": "/object/sign/x?token=abc"})
+            url = storage.signed_url("myfile")
+            assert url == "https://test.supabase.co/storage/v1/object/sign/x?token=abc"
+
+        with patch("app.storage.requests.post") as mock_post:
+            mock_post.return_value = MagicMock(status_code=403, text="forbidden")
+            assert storage.upload(b"x", "application/pdf") is None, "a failed upload must return None, not raise"
+
+        with patch("app.storage.requests.delete") as mock_delete:
+            mock_delete.return_value = MagicMock(status_code=200)
+            storage.delete("myfile")
+            assert f"/storage/v1/object/{storage.BUCKET}/myfile" in mock_delete.call_args.args[0]
+    print("storage module test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -1091,6 +1133,7 @@ if __name__ == "__main__":
     test_reminder_ladder_catchup_offshift_and_autoclaim()
     test_shift_end_headsup_and_conditional_reassignment()
     test_shift_start_first_tick_sends_nothing_then_detects_new_shift()
+    test_storage_module_degrades_and_builds_correct_requests()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

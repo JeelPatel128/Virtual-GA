@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from . import knowledge, llm, schedule, teams, tickets
+from . import directory, knowledge, llm, schedule, teams, tickets
 from .config import BASE_DIR, load_team, settings
 from .db import ChatSession, Doc, Message, QueryLog, SessionLocal, Ticket, init_db, utcnow
 
@@ -458,6 +458,18 @@ def admin_search(q: str, db=Depends(get_db)):
 @app.post("/api/admin/reembed", dependencies=[Depends(require_admin)])
 def reembed(db=Depends(get_db)):
     return {"embedded": knowledge.reembed_missing(db)}
+
+
+@app.post("/api/admin/directory/import", dependencies=[Depends(require_admin)])
+async def import_directory(file: UploadFile = File(...), db=Depends(get_db)):
+    text = (await file.read()).decode("utf-8", errors="replace")
+    return directory.import_people_csv(db, text)
+
+
+@app.post("/api/admin/rooms/import", dependencies=[Depends(require_admin)])
+async def import_rooms(file: UploadFile = File(...), db=Depends(get_db)):
+    text = (await file.read()).decode("utf-8", errors="replace")
+    return directory.import_rooms_csv(db, text)
 
 
 @app.get("/api/admin/schedule", dependencies=[Depends(require_admin)])

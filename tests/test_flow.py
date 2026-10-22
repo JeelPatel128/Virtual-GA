@@ -97,6 +97,41 @@ def title(card):
     return card["attachments"][0]["content"]["body"][0]["text"]
 
 
+PEOPLE_CSV_HEADER = ("name,first_name,last_name,aliases,title,type,building,room,floor,directions,"
+                     "office_hours,extension,email,roles,route_topics_here,show_publicly,last_verified,review_notes")
+
+
+def test_directory_import_upserts_and_preserves_edits():
+    csv1 = PEOPLE_CSV_HEADER + "\n" + "\n".join([
+        'Alice Example,Alice,Example,Alice,Professor,Faculty,Babbio Center,101,1,,'
+        '"Mon to Fri, 9 AM to 5 PM",1111,alice@example.com,,yes,yes,2026-01-01,',
+        'Bob Example,Bob,Example,Bob,Staff,Staff,Altorfer,202,2,,'
+        '"Mon to Fri, 9 AM to 5 PM",2222,,,yes,yes,2026-01-01,',
+    ])
+    csv2 = PEOPLE_CSV_HEADER + "\n" + (
+        'Alice Example,Alice,Example,Alice,Professor,Faculty,Babbio Center,101,1,,'
+        '"Mon to Fri, 9 AM to 5 PM",1111,,,yes,yes,2026-01-01,'  # email blank this time
+    )
+    with TestClient(app) as c:
+        r1 = c.post("/api/admin/directory/import", headers=A, files={"file": ("d1.csv", csv1, "text/csv")})
+        assert r1.status_code == 200 and r1.json()["added"] == 2, r1.text
+
+        r2 = c.post("/api/admin/directory/import", headers=A, files={"file": ("d2.csv", csv2, "text/csv")})
+        assert r2.status_code == 200
+        assert r2.json()["updated"] == 1 and r2.json()["inactivated"] == 1, r2.json()
+
+        from sqlalchemy import select
+        from app.db import Person
+        db = SessionLocal()
+        alice = db.scalar(select(Person).where(Person.name == "Alice Example"))
+        bob = db.scalar(select(Person).where(Person.name == "Bob Example"))
+        assert alice.email == "alice@example.com", "blank CSV cell must not wipe an existing value"
+        assert alice.active is True
+        assert bob.active is False, "a row missing from the new CSV must be hidden, not deleted"
+        db.close()
+    print("directory import upsert test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -251,4 +286,5 @@ def test_full_flow():
 
 if __name__ == "__main__":
     test_migration_adds_columns_to_old_tables()
+    test_directory_import_upserts_and_preserves_edits()
     test_full_flow()

@@ -44,6 +44,20 @@ class Doc(Base):
     mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
     added_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # FAQ bulk import (migrated onto the existing table, see _ensure_columns). faq_type
+    # is the CSV's own "type" column (Answer/Directory/Task/Live/Handoff) - named to
+    # avoid clashing with kind above. external_id is the CSV's short code (e.g. P1, R3),
+    # used to upsert by id on re-import rather than duplicating rows.
+    external_id: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    faq_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    variants: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    asked_by: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    times_mentioned: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    handled_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    changes_each_semester: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
 
 class Chunk(Base):
@@ -235,6 +249,17 @@ _MIGRATIONS = [
     ("tickets", "confirmed_at", "TIMESTAMP"),
     ("tickets", "file_backend", "TEXT"),
     ("tickets", "file_ref", "TEXT"),
+    # FAQ bulk import
+    ("docs", "external_id", "TEXT"),
+    ("docs", "category", "TEXT"),
+    ("docs", "faq_type", "TEXT"),
+    ("docs", "variants", "JSON"),
+    ("docs", "asked_by", "TEXT"),
+    ("docs", "times_mentioned", "INTEGER"),
+    ("docs", "source", "TEXT"),
+    ("docs", "handled_by", "TEXT"),
+    ("docs", "changes_each_semester", "BOOLEAN"),
+    ("docs", "status", "TEXT"),
 ]
 
 

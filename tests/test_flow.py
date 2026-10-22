@@ -75,6 +75,10 @@ def test_migration_adds_columns_to_old_tables():
             on_shift TEXT, responded_by TEXT, created_at TIMESTAMP,
             first_response_at TIMESTAMP, escalated_at TIMESTAMP, resolved_at TIMESTAMP
         );
+        CREATE TABLE docs (
+            id INTEGER PRIMARY KEY, title TEXT, kind TEXT, extracted_text TEXT,
+            image_bytes BLOB, mime TEXT, added_by TEXT, created_at TIMESTAMP
+        );
     """)
     con.commit(); con.close()
 
@@ -84,12 +88,15 @@ def test_migration_adds_columns_to_old_tables():
     with eng.connect() as conn:
         session_cols = db_module._existing_columns(conn, "sessions")
         ticket_cols = db_module._existing_columns(conn, "tickets")
+        doc_cols = db_module._existing_columns(conn, "docs")
     assert {"last_person_id", "pending_query", "pending_choices"} <= session_cols
     assert {"kind", "recipient_person_id", "deadline_at"} <= ticket_cols
     assert {"owner", "owner_history", "activity", "next_deadline", "last_reminder_step",
            "snooze_count", "due_at", "cancelled_reason", "task", "file_name", "file_mime",
            "file_bytes", "requester_email", "confirmed", "confirmed_at",
            "file_backend", "file_ref"} <= ticket_cols
+    assert {"external_id", "category", "faq_type", "variants", "asked_by", "times_mentioned",
+           "source", "handled_by", "changes_each_semester", "status"} <= doc_cols
     eng.dispose()
 
 

@@ -275,6 +275,29 @@ def test_disambiguation_buttons():
     print("disambiguation buttons test passed")
 
 
+def test_remembered_person_pronoun_followup():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        last = _ask_text(c, sid, "Howie")
+        assert "Haoying Xu" in last["text"], last
+
+        last = _ask_text(c, sid, "is he in today")
+        assert "Haoying Xu" in last["text"], last
+
+        # a stale remembered id (e.g. after a re-import deleted/replaced it) must not crash
+        from sqlalchemy import select
+        from app.db import ChatSession
+        db = SessionLocal()
+        s = db.get(ChatSession, sid)
+        s.last_person_id = 999999
+        db.commit(); db.close()
+        last = _ask_text(c, sid, "is he around")
+        assert "999999" not in str(last)
+    print("remembered person / pronoun follow-up test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -433,4 +456,5 @@ if __name__ == "__main__":
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()
     test_disambiguation_buttons()
+    test_remembered_person_pronoun_followup()
     test_full_flow()

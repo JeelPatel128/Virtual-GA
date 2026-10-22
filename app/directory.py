@@ -32,6 +32,7 @@ TITLE_WORD_RE = re.compile(r"\b(professor|prof|dr|doctor|dean|mr|ms|mrs)\b", re.
 TITLE_WORDS = ["professor", "prof", "dr", "doctor", "dean", "mr", "ms", "mrs"]
 EXTENSION_RE = re.compile(r"\b(extension|ext\.?|phone\s*number|office\s*number)\b", re.I)
 EMAIL_RE = re.compile(r"\bemail\b", re.I)
+PRONOUN_RE = re.compile(r"\b(he|she|him|her|his|hers|they|them|their)\b", re.I)
 
 
 def get_show_extensions(db) -> bool:
@@ -257,6 +258,14 @@ def resolve(db, sess, text: str) -> dict | None:
     candidates = _name_candidates(db, text)
     strong = [c for c in candidates if c[1] >= NAME_HIGH]
     if not strong:
+        # A pronoun with no new name/role signal refers back to whoever was last resolved
+        # in this session ("is she in?", "what's his extension?"). A re-import can delete-
+        # and-reinsert, so a stale remembered id is forgotten rather than crashing.
+        if PRONOUN_RE.search(text) and sess.last_person_id:
+            person = db.get(Person, sess.last_person_id)
+            if person is not None and person.active:
+                return _format_person_answer(person, text, get_show_extensions(db))
+            sess.last_person_id = None
         # Weak/no candidates: only treat this as a person question (and refuse to silently
         # fall through) if the text actually looks person-ish. Otherwise a merely coincidental
         # weak fuzzy overlap (e.g. a long sentence sharing a few letters with someone's name)

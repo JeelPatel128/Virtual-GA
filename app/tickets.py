@@ -7,9 +7,9 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
 
-from . import schedule, teams
+from . import schedule, storage, teams
 from .config import lead_ga, load_team, settings
-from .db import ChatSession, Message, QueryLog, Ticket, kv_get, kv_set, utcnow
+from .db import ChatSession, Message, QueryLog, TaskFile, Ticket, kv_get, kv_set, utcnow
 
 TZ = ZoneInfo(settings.TIMEZONE)
 # Unified across all three kinds (visitor/message/task). `activity` carries the old
@@ -302,7 +302,36 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
                                         "You can keep asking me questions anytime.")
     else:
         raise ValueError(f"Unknown action {action}")
+    if t.status in ("done", "cancelled"):
+        _clear_task_file(db, t)
     db.commit()
+
+
+def _clear_task_file(db, t: Ticket) -> None:
+    """File privacy: once a task ticket is done or cancelled, its attachment is removed
+    from wherever it lives - a visitor's print job or ID photo never lingers after the
+    GAs no longer need it."""
+    if not t.file_backend:
+        return
+    if t.file_backend == "supabase" and t.file_ref:
+        storage.delete(t.file_ref)
+    elif t.file_backend == "local" and t.file_ref:
+        tf = db.get(TaskFile, int(t.file_ref))
+        if tf:
+            db.delete(tf)
+    t.file_backend = t.file_ref = None
+
+
+def purge_old_task_files(db, days: int = 14) -> int:
+    """Backstop sweep: clear any task attachment older than `days` regardless of status,
+    in case a ticket is left open indefinitely."""
+    cutoff = utcnow() - timedelta(days=days)
+    rows = db.scalars(select(Ticket).where(Ticket.file_backend.is_not(None),
+                                           Ticket.created_at < cutoff)).all()
+    for t in rows:
+        _clear_task_file(db, t)
+    db.commit()
+    return len(rows)
 
 
 def confirm_reached(db, t: Ticket, reached: bool) -> None:
@@ -572,7 +601,7 @@ def check_shift_starts(db) -> int:
 
 
 def tick(db) -> dict:
-    result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0}
+    result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0, "task_files_purged": 0}
     result["shift_ends_handled"] = check_shift_ends(db)
     result["shift_starts_handled"] = check_shift_starts(db)
     result["task_headsups_sent"] = check_task_heads_up(db)
@@ -583,6 +612,7 @@ def tick(db) -> dict:
         kv_set(db, "digest_date", today)
         result["digest_sent"] = True
         result["phones_purged"] = purge_old_phone_numbers(db)  # once a day is plenty
+        result["task_files_purged"] = purge_old_task_files(db)  # once a day is plenty
         db.commit()
     return result
 

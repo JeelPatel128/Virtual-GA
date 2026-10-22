@@ -496,6 +496,58 @@ def test_task_request_creation_and_file_privacy():
     print("task request creation / file privacy test passed")
 
 
+def test_file_cleared_on_done_and_fourteen_day_sweep():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        due = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        from app.db import Ticket as _Ticket, TaskFile as _TaskFile
+
+        # the attachment is removed the moment a task ticket is resolved
+        sid = c.post("/api/session").json()["session_id"]
+        r = c.post(f"/api/session/{sid}/task", data={
+            "name": "Ana", "type": "Other", "details": "see attached", "due_at": due},
+            files={"file": ("notes.pdf", b"fake pdf bytes", "application/pdf")})
+        tid = r.json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
+
+        db = SessionLocal()
+        t = db.get(_Ticket, tid)
+        assert t.file_backend == "local" and t.file_ref is not None
+        tf_id = int(t.file_ref)
+        db.close()
+
+        assert c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+                      json={"ga_name": "GA Two", "action": "resolve"}).status_code == 200
+
+        db = SessionLocal()
+        t = db.get(_Ticket, tid)
+        assert t.file_backend is None and t.file_ref is None
+        assert db.get(_TaskFile, tf_id) is None, "local file row must be deleted once the task is done"
+        db.delete(t); db.commit(); db.close()
+        assert c.get(f"/api/ga/ticket/{tid}/file", headers=GA).status_code == 404
+
+        # 14-day sweep clears a file on a ticket that's still open, as a backstop
+        sid2 = c.post("/api/session").json()["session_id"]
+        r2 = c.post(f"/api/session/{sid2}/task", data={
+            "name": "Ben", "type": "Other", "details": "see attached", "due_at": due},
+            files={"file": ("old.pdf", b"old pdf bytes", "application/pdf")})
+        tid2 = r2.json()["ticket_id"]
+
+        db = SessionLocal()
+        t2 = db.get(_Ticket, tid2)
+        t2.created_at = datetime.utcnow() - timedelta(days=15)
+        tf2_id = int(t2.file_ref)
+        db.commit(); db.close()
+
+        db = SessionLocal()
+        assert tickets.purge_old_task_files(db) >= 1
+        t2 = db.get(_Ticket, tid2)
+        assert t2.file_backend is None and t2.file_ref is None
+        assert db.get(_TaskFile, tf2_id) is None
+        db.delete(t2); db.commit(); db.close()
+    print("file privacy on done + 14-day sweep test passed")
+
+
 def test_task_heads_up_fires_once_30_min_before_due():
     with TestClient(app) as c:
         GA = {"X-GA-Key": "gakey"}
@@ -1241,6 +1293,7 @@ if __name__ == "__main__":
     test_shift_start_first_tick_sends_nothing_then_detects_new_shift()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
+    test_file_cleared_on_done_and_fourteen_day_sweep()
     test_task_heads_up_fires_once_30_min_before_due()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()

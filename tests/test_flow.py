@@ -100,6 +100,101 @@ def title(card):
 PEOPLE_CSV_HEADER = ("name,first_name,last_name,aliases,title,type,building,room,floor,directions,"
                      "office_hours,extension,email,roles,route_topics_here,show_publicly,last_verified,review_notes")
 
+HOURS = "Mon to Fri, 9 AM to 5 PM"
+DIRECTORY_FIXTURE_CSV = PEOPLE_CSV_HEADER + "\n" + "\n".join([
+    # alias "Jose" is a literal bare alias; route_topics_here=no
+    f'Josa Balisi,Josa,Balisi,"Balisi | Josa | Jose",Assoc. Dir. of Academic Operations,Staff,'
+    f'Babbio Center,401J,4,"Stand at the front desk. 401J is on your right.",{HOURS},8070,,'
+    f'academic operations,no,yes,2026-01-01,',
+    # alias "Howie" is a literal bare alias; no directions on file (matches real data shape)
+    f'Haoying Xu,Haoying,Xu,"Dr. Xu | Haoying | Howie | Howie Xu | Prof. Xu | Xu",Assistant Professor,'
+    f'Faculty,Babbio Center,422A,4,,{HOURS},3476,,,yes,yes,2026-01-01,',
+    # typo test target: "Profesor Altonen" must fuzzy-resolve here
+    f'Aleksi Aaltonen,Aleksi,Aaltonen,"Aaltonen | Aleksi | Dr. Aaltonen | Prof. Aaltonen | '
+    f'Professor Aaltonen | Professor Aleksi",Associate Professor,Faculty,Babbio Center,616,6,,'
+    f'{HOURS},5423,,,yes,yes,2026-01-01,',
+    # floor 4, WITH directions -> should get the map
+    f'Christina Alwell,Christina,Alwell,"Alwell | Christina",Manager of Industry Capstone Program,'
+    f'Staff,Babbio Center,401G,4,"Stand at the front desk. 401G is on your left.",{HOURS},5396,,'
+    f'Industry Capstone program,yes,yes,2026-01-01,',
+    # synthetic: floor 6, WITH directions -> must NOT get the map (proves the floor gate)
+    f'Floor Six Fixture,Floor,Fixture,"Floor Six Fixture",Research Fellow,Faculty,Babbio Center,'
+    f'616B,6,"Test directions that should never trigger the 4th-floor map.",{HOURS},9999,,,'
+    f'yes,yes,2026-01-01,',
+    # Altorfer, no directions
+    f'Altorfer Fixture,Altorfer,Fixture,"Altorfer Fixture",Senior Lecturer,Faculty,Altorfer,404,4,,'
+    f'{HOURS},8642,,,yes,yes,2026-01-01,',
+    # Remote
+    f'Remote Fixture,Remote,Fixture,"Remote Fixture",Development Officer,Staff,Remote,,,,'
+    f'{HOURS},3487,,alumni giving,yes,yes,2026-01-01,',
+    # academic advisor (graduate) vs the plain "academic advisor" below -> role-match test
+    f'Lisa Burns,Lisa,Burns,Burns,Senior Graduate Academic Advisor,Staff,Babbio Center,303L,3,,'
+    f'{HOURS},8595,,academic advisor (graduate),yes,yes,2026-01-01,',
+    f'Lisa Cavanaugh,Lisa,Cavanaugh,Cavanaugh,Academic Advisor,Staff,Babbio Center,303M,3,,'
+    f'{HOURS},8596,,academic advisor,yes,yes,2026-01-01,',
+    # COPA / PhD / Dean role-match tests
+    f'Copa Fixture,Copa,Fixture,"Copa Fixture",Careers Coordinator,Staff,Babbio Center,303N,3,,'
+    f'{HOURS},8597,,"COPA, careers, resume help, recruiters",yes,yes,2026-01-01,',
+    f'Phd Fixture,Phd,Fixture,"Phd Fixture",PhD Program Coordinator,Staff,Babbio Center,303O,3,,'
+    f'{HOURS},8598,,"PhD program, dissertation forms",yes,yes,2026-01-01,',
+    f'GJ de Vreede,GJ,de Vreede,"Dean de Vreede | GJ | de Vreede | the Dean",Dean,Staff,Babbio Center,'
+    f'408A,4,"Walk past the 401 offices. 408A is in the left corner.",{HOURS},8565,,'
+    f'Dean of the School of Business,no,yes,2026-01-01,',
+    f'Megan Maher,Megan,Maher,"Maher | Megan",Executive Assistant to the Dean,Staff,Babbio Center,'
+    f'401E,4,"Stand at the front desk. 401E is on your left.",{HOURS},8548,,"Dean office",no,yes,'
+    f'2026-01-01,',
+    # two Chens for disambiguation tests (bare "Chen" matches last_name on both, not an alias)
+    f'Jing Chen,Jing,Chen,"Dr. Chen | Jing | Prof. Chen | Professor Chen | Professor Jing",'
+    f'Associate Professor,Faculty,Babbio Center,414,4,,{HOURS},8062,,,yes,yes,2026-01-01,',
+    f'Violet Chen,Violet,Chen,"Dr. Chen | Prof. Chen | Professor Chen | Professor Violet | Violet",'
+    f'Assistant Professor,Faculty,Babbio Center,629,6,,{HOURS},3521,,,yes,yes,2026-01-01,',
+])
+
+
+def _import_directory_fixture(c) -> None:
+    r = c.post("/api/admin/directory/import", headers=A, files={"file": ("dir.csv", DIRECTORY_FIXTURE_CSV, "text/csv")})
+    assert r.status_code == 200, r.text
+
+
+def _ask_text(c, sid: str, text: str) -> dict:
+    c.post(f"/api/session/{sid}/ask", json={"text": text})
+    return c.get(f"/api/session/{sid}/messages").json()["messages"][-1]
+
+
+def test_directory_name_matching_and_building_formats():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        last = _ask_text(c, sid, "Howie")
+        assert "Haoying Xu" in last["text"], last
+        assert "A GA can point you there" in last["text"], last  # no directions on file
+
+        last = _ask_text(c, sid, "Jose")
+        assert "Josa Balisi" in last["text"], last
+
+        last = _ask_text(c, sid, "Profesor Altonen")
+        assert "Aleksi Aaltonen" in last["text"], last
+
+        last = _ask_text(c, sid, "where's Christina Alwell")
+        assert "Christina Alwell" in last["text"] and "401G" in last["text"], last
+        assert last["meta"].get("images") == ["/api/directory/floor-map"], last
+
+        last = _ask_text(c, sid, "where's the Floor Six Fixture person")
+        assert "Floor Six Fixture" in last["text"], last
+        assert not last["meta"].get("images"), "map must not attach off the 4th floor"
+
+        last = _ask_text(c, sid, "where is Altorfer Fixture")
+        assert "Altorfer building" in last["text"], last
+
+        last = _ask_text(c, sid, "where is Remote Fixture")
+        assert "work remotely" in last["text"], last
+
+        last = _ask_text(c, sid, "is Professor Nguyen in today")
+        assert last["meta"].get("offer_handoff") is True, last
+        assert "couldn't find" in last["text"].lower(), last
+    print("directory name matching + building formats test passed")
+
 
 def test_directory_import_upserts_and_preserves_edits():
     csv1 = PEOPLE_CSV_HEADER + "\n" + "\n".join([
@@ -287,4 +382,5 @@ def test_full_flow():
 if __name__ == "__main__":
     test_migration_adds_columns_to_old_tables()
     test_directory_import_upserts_and_preserves_edits()
+    test_directory_name_matching_and_building_formats()
     test_full_flow()

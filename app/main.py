@@ -177,6 +177,12 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
         db.commit()
         return {"relayed": True}
 
+    resolved = directory.resolve(db, sess, text)
+    if resolved is not None:
+        tickets.say(db, sid, "bot", resolved["answer"], meta=resolved.get("meta", {}))
+        db.commit()
+        return {"relayed": False}
+
     hour_ago = utcnow() - timedelta(hours=1)
     asked = db.scalar(select(func.count()).select_from(QueryLog)
                       .where(QueryLog.session_id == sid, QueryLog.created_at >= hour_ago))
@@ -251,6 +257,16 @@ def kb_image(doc_id: int, db=Depends(get_db)):
         raise HTTPException(404)
     return Response(d.image_bytes, media_type=d.mime or "image/png",
                     headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/directory/floor-map")
+def floor_map():
+    matches = sorted((BASE_DIR / "data").glob("babbio-4th-floor-map.*"))
+    if not matches:
+        raise HTTPException(404)
+    path = matches[0]
+    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ---------------- GA console API ----------------

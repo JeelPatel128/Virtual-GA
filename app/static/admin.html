@@ -38,6 +38,7 @@
 <div id="main" style="display:none">
   <nav>
     <button data-tab="kb" class="on">Knowledge</button>
+    <button data-tab="directory">Directory</button>
     <button data-tab="sched">Schedule</button>
     <button data-tab="digest">Today</button>
     <button data-tab="setup">Setup</button>
@@ -74,6 +75,25 @@
         <div id="sres"></div>
       </form>
       <div class="card"><h2>Knowledge base</h2><div id="jobs"></div><div id="docs" class="hint">Loading...</div></div>
+    </section>
+
+    <section id="directory">
+      <div class="card"><h2>Who's loaded</h2><div id="dirCounts">Loading...</div></div>
+      <div class="grid">
+        <form class="card" id="peopleForm">
+          <h2>Import people directory</h2>
+          <p class="hint">ssb_directory.csv. Replaces matching rows by name; a blank cell never
+          erases an existing value; rows missing from the file are hidden, not deleted.</p>
+          <label for="peopleFile">CSV file</label><input id="peopleFile" type="file" required accept=".csv">
+          <button class="btn" style="margin-top:10px">Import</button><div class="msgline" id="peopleMsg"></div>
+        </form>
+        <form class="card" id="roomsForm">
+          <h2>Import rooms/places</h2>
+          <p class="hint">babbio4_rooms.csv. Same replace-by-key rule as people.</p>
+          <label for="roomsFile">CSV file</label><input id="roomsFile" type="file" required accept=".csv">
+          <button class="btn" style="margin-top:10px">Import</button><div class="msgline" id="roomsMsg"></div>
+        </form>
+      </div>
     </section>
 
     <section id="sched">
@@ -156,6 +176,23 @@ $("searchForm").onsubmit = async (e) => { e.preventDefault();
   $("sres").innerHTML = d.hits.length ? d.hits.map(h => `<div class="doc"><div><div class="t">${esc(h.title)} <span class="hint">score ${h.score} (${h.method})</span></div><div class="p">${esc(h.text)}</div></div></div>`).join("")
     : '<p class="hint">Nothing matched. The bot would offer to get a GA.</p>'; };
 
+async function loadDirectory() {
+  const s = await api("/api/admin/status");
+  $("dirCounts").innerHTML = `<p><b>${s.people_count}</b> people, <b>${s.rooms_count}</b> rooms/places currently active.</p>`;
+}
+$("peopleForm").onsubmit = async (e) => { e.preventDefault();
+  const f = $("peopleFile").files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  try { const r = await api("/api/admin/directory/import", { method: "POST", body: fd });
+    flash("peopleMsg", `${r.added} added, ${r.updated} updated, ${r.inactivated} hidden.`); loadDirectory(); }
+  catch (er) { flash("peopleMsg", er.message, true); } };
+$("roomsForm").onsubmit = async (e) => { e.preventDefault();
+  const f = $("roomsFile").files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  try { const r = await api("/api/admin/rooms/import", { method: "POST", body: fd });
+    flash("roomsMsg", `${r.added} added, ${r.updated} updated, ${r.inactivated} hidden.`); loadDirectory(); }
+  catch (er) { flash("roomsMsg", er.message, true); } };
+
 async function loadSched() {
   const s = await api("/api/admin/schedule");
   $("schedBody").innerHTML = `<p>Calendar: ${s.connected ? '<span class="ok">connected</span>' : '<span class="no">not connected</span>'}${s.error ? " · " + esc(s.error) : ""}</p>
@@ -191,7 +228,7 @@ $("testTeams").onclick = async () => { const r = await api("/api/admin/test-team
 $("reembed").onclick = async () => { try { const r = await api("/api/admin/reembed", { method: "POST" }); flash("setupMsg", `Re-indexed ${r.embedded} chunks.`); } catch (er) { flash("setupMsg", er.message, true); } };
 $("showExtensions").onchange = async (e) => { try { await api("/api/admin/settings", { method: "POST", body: JSON.stringify({ show_extensions: e.target.checked }) }); flash("extMsg", "Saved"); } catch (er) { flash("extMsg", er.message, true); } };
 
-const loaders = { kb: loadDocs, sched: loadSched, digest: loadDigest, setup: loadSetup };
+const loaders = { kb: loadDocs, directory: loadDirectory, sched: loadSched, digest: loadDigest, setup: loadSetup };
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button, section").forEach(x => x.classList.remove("on"));
   b.classList.add("on"); $(b.dataset.tab).classList.add("on"); loaders[b.dataset.tab]().catch(() => {});

@@ -504,6 +504,15 @@ def test_ga_directory_search():
     print("GA directory search test passed")
 
 
+def test_admin_status_reports_directory_counts():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        s = c.get("/api/admin/status", headers=A).json()
+        assert s["people_count"] == 16, s
+        assert s["rooms_count"] == 6, s
+    print("admin status directory counts test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -669,4 +678,5 @@ if __name__ == "__main__":
     test_common_word_gate_faq_regression()
     test_message_ticket_deadline_and_escalation()
     test_ga_directory_search()
+    test_admin_status_reports_directory_counts()
     test_full_flow()

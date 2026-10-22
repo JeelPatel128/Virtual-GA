@@ -560,8 +560,12 @@ def test_teams():
 
 @app.get("/api/admin/status", dependencies=[Depends(require_admin)])
 def admin_status(db=Depends(get_db)):
+    from .db import Room
+    people_count = db.scalar(select(func.count()).select_from(Person).where(Person.active.is_(True)))
+    rooms_count = db.scalar(select(func.count()).select_from(Room).where(Room.active.is_(True)))
     return {"ai_enabled": llm.enabled(), "teams_configured": bool(settings.TEAMS_WEBHOOK_URL),
             "calendar_configured": bool(settings.GCAL_ICS_URL), "public_url": settings.PUBLIC_BASE_URL,
+            "people_count": people_count, "rooms_count": rooms_count,
             **tickets.stats(db)}
 
 

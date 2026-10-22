@@ -7,13 +7,15 @@ FastAPI (Python 3.12), SQLAlchemy (SQLite locally, Supabase Postgres in prod), G
 
 ## Layout
 - `app/main.py` routes (visitor `/api/session/*`, GA `/api/ga/*`, admin `/api/admin/*`, `/tasks/tick`)
-- `app/tickets.py` handoff, GA actions, escalation, digest, phone purge
+- `app/tickets.py` handoff, GA actions, escalation (5 min, or shift-end for a message ticket), digest, phone purge
 - `app/knowledge.py` extraction, chunking, embeddings, search (keyword fallback when no Gemini key)
+- `app/directory.py` person/place resolver (runs before the AI, works with no Gemini key): exact/fuzzy name match, role match, place match; CSV upsert import (`data/*.csv`, gitignored, loaded only through the admin page, never read from disk at request time)
 - `app/llm.py` all Gemini calls; every function must degrade gracefully without a key
 - `app/schedule.py` calendar parsing; shift = event whose title contains a GA name or alias from team.json
 - `app/teams.py` Adaptive Cards; buttons are Action.OpenUrl only (no Teams bot)
 - `app/static/` plain HTML/JS pages, no build step
-- `tests/test_flow.py` end-to-end test, no external services
+- `tools/find_emails.py` standalone script (not part of the deployed app), finds public stevens.edu emails for the directory; run locally, never from the live site
+- `tests/test_flow.py` end-to-end test, no external services, no network calls
 
 ## Commands
 - Run: `uvicorn app.main:app --reload`
@@ -23,6 +25,7 @@ FastAPI (Python 3.12), SQLAlchemy (SQLite locally, Supabase Postgres in prod), G
 - Never commit `.env`, `team.json`, or any key, webhook URL or iCal link. Secrets live in `.env` locally and Render env vars in prod.
 - Never post a visitor's phone number to Teams. It is shown only in the GA console and purged after PHONE_RETENTION_DAYS.
 - The bot answers only from the knowledge base. Do not loosen the "not sure, get a GA" behaviour to make answers look better.
+- The directory resolver never invents a person or an office. A shared name gets "Did you mean ...?" buttons, never a silent pick. Extensions are hidden from visitors unless the admin `show_extensions` setting is on; always visible in the GA console.
 - No student records, grades, IDs or financial info anywhere in the system.
 - Keep the HTML pages dependency-free and mobile-first (visitors use phones).
 - Visitor-facing text: short, friendly, plain language, no em dashes.

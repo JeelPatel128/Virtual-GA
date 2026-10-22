@@ -104,6 +104,51 @@ Then:
 - Check **Today** in `/admin` (or the daily digest) for questions it couldn't answer, and click **Answer this** to turn each one into a Q&A.
 - Use **Test what it finds** to check that a question pulls up the right content.
 
+## Directory: finding a person or a place
+
+Any question about a specific SSB person or a Babbio 4th-floor place is answered by the
+directory resolver (`app/directory.py`), not the general knowledge base, and runs before
+the AI - it works even with no `GEMINI_API_KEY` set. It never invents a person or an
+office: an unmatched name gets "I couldn't find anyone by that name, want a GA?" and a
+shared name (e.g. two people named Chen) gets "Did you mean ...?" buttons, never a silent
+guess.
+
+**Loading the data.** `data/ssb_directory.csv` and `data/babbio4_rooms.csv` are gitignored
+(they're not meant to live in git history) and are never read from disk by the running
+app. On the **Directory** tab in `/admin`, upload each CSV; this upserts by name/place -
+a blank cell never erases an existing value, and a row missing from a new upload is hidden,
+not deleted, so nothing already resolved mid-conversation or already email-approved goes
+stale.
+
+**What it matches on:** exact name/alias, then a fuzzy match (typos, a first or last name
+alone, "Prof"/"Dr"/"Dean" prefixes), then the person's `roles` column ("my grad advisor",
+"COPA person", "Capstone"). A bare common English word that happens to also be a real name
+in the data (e.g. "Park", "Sun", "Lee") only counts as a match when the question also has a
+title word or a clear "where is X" / "is X in" / "X's office" phrasing around it - not on
+its own, so an unrelated question never gets hijacked. `route_topics_here = no` keeps a
+person's location answerable by name while excluding them from "who handles this topic"
+role matches. Extensions are hidden from visitors unless the **Setup** tab's
+`show_extensions` toggle is on; the GA console's directory search always shows them.
+
+**Leaving a message for someone specific:** asking if someone is in gets "Ask a GA to
+check" or "Leave a message" buttons (never "they're in right now" - office hours only). A
+left message still pages whoever's on shift in Teams ("Message for `<name>`"), but its
+escalation deadline is the end of the current shift instead of 5 minutes, since nobody
+needs to drop what they're doing - it still can't be forgotten, since it goes through the
+same escalation chain as every other ticket.
+
+**Finding emails.** All 105 rows start with an empty `email` column. `tools/find_emails.py`
+is a separate script you run on your own Mac (not part of the deployed app, no network
+calls happen from the live site): `python3 tools/find_emails.py`. It reads the real SSB
+faculty listing page (politely - checks robots.txt, waits 2 seconds between requests,
+caches pages so a re-run resumes) and writes `data/email_candidates.csv` with a confidence
+level and source URL per row, flagging any office/extension that doesn't match the CSV.
+Staff and PhD-student rows have no public listing page, so hand-fill
+`tools/known_profile_urls.csv` (`name,url`, gitignored) for the ones you want covered -
+anyone left out gets nothing rather than a guess. Upload the output on the **Directory**
+tab's **Import found emails** form, then approve or reject each one under **Review
+emails** - nothing reaches the live directory unapproved.
+
 ## Running locally
 
 ```bash
@@ -133,11 +178,13 @@ python tests/test_flow.py
 ## Project layout
 ```
 app/main.py         routes: visitor chat, GA console, admin, cron tick
-app/tickets.py      handoffs, GA actions, 5-min escalation, daily digest, phone cleanup
+app/tickets.py      handoffs, GA actions, escalation (5-min or shift-end for a message), digest, phone cleanup
 app/knowledge.py    file reading, chunking, embeddings, search
+app/directory.py    person/place resolver: name, fuzzy, role matching; CSV upsert import
 app/llm.py          Gemini: answers, embeddings, image and video reading
 app/schedule.py     Google Calendar shifts
 app/teams.py        Teams Adaptive Cards
 app/static/         visitor.html, ga.html, admin.html
+tools/find_emails.py  standalone script: finds public stevens.edu emails for the directory
 tests/test_flow.py  full end-to-end test
 ```

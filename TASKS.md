@@ -48,6 +48,22 @@ Legend: **[JP]** = you do it (accounts, approvals, content, decisions). **[CC]**
 | 2.4 | CC | Build an **eval script** that runs those questions through the bot and reports correct, wrong and "not sure". Tune retrieval and the prompt until wrong answers are near zero | Report: X/25 correct, 0 confidently wrong |
 | 2.5 | JP | Upload the floor maps, flyers and any how-to videos | |
 
+## Phase 2b: Directory / person lookup (2026-10-21, built in 17 small commits)
+
+| # | Who | Task | Done when |
+|---|---|---|---|
+| 2b.1 | CC | Person resolver: exact/fuzzy name & alias match, role match ("my grad advisor", "COPA person"), common-word gate so a bare word that's also a real name ("Park", "Sun") needs title/phrase support, "Did you mean?" buttons for a shared name, session memory for pronoun follow-ups ("is she in?") | ✅ Done. 50-question synthetic FAQ regression (no false matches) plus all of the original spec's named test cases pass |
+| 2b.2 | CC | Building-specific answers (Babbio w/ & w/o directions + 4th-floor map, Altorfer, Remote), extensions hidden unless admin enables `show_extensions`, `route_topics_here=no` keeps a person findable by name but out of role-based routing | ✅ Done |
+| 2b.3 | CC | Place lookups against `babbio4_rooms.csv` (lounge, washrooms, room 4xx, 401/433 offices) | ✅ Done |
+| 2b.4 | CC | "Leave a message for X": pages whoever's on shift, deadline is the end of the current shift (not 5 min), still escalates through the normal chain so it can't be forgotten | ✅ Done |
+| 2b.5 | CC | Admin **Directory** tab: CSV upload (upsert by name/place - a blank cell never erases an edit; a missing row is hidden, not deleted), GA console directory search (always shows extension/email) | ✅ Done |
+| 2b.6 | CC | `tools/find_emails.py`: standalone, polite scraper for public stevens.edu emails, admin review/approve screen before anything reaches the live directory | ✅ Built. See the real run's results below once it's been executed |
+| 2b.7 | JP | Upload the real `data/ssb_directory.csv` and `data/babbio4_rooms.csv` through the admin **Directory** tab (they're gitignored - not in git history, and not auto-loaded) | ⏳ Not yet done - the 105-row/20-row real CSVs are sitting in `data/` but nothing has imported them into a running database yet |
+| 2b.8 | JP | For Staff/PhD-student rows (no public stevens.edu listing page), hand-fill `tools/known_profile_urls.csv` (`name,url`) with whichever profile/bio pages you know of, if you want the email finder to cover them - anyone left out just gets skipped, not guessed | ⏳ Optional, your call |
+| 2b.9 | JP | Review and approve/reject each row in **Review emails** after running `tools/find_emails.py` | ⏳ Pending the real run |
+
+**Known limitation carried over:** the Arpan Josa-vs-front-desk calendar-color issue from Phase 0 (`#phase-0`) is unrelated to this feature but still unresolved - his calendar titling still needs a fix on the Google Calendar side.
+
 ## Phase 3: Pilot (internal, before the QR goes on the desk)
 
 | # | Who | Task | Done when |

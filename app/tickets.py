@@ -26,6 +26,10 @@ def local(dt: datetime) -> datetime:
     return dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(TZ)
 
 
+def _to_naive_utc(dt: datetime) -> datetime:
+    return dt.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+
 def say(db, session_id: str, sender: str, text: str, ga_name: str | None = None, meta: dict | None = None) -> Message:
     m = Message(session_id=session_id, sender=sender, text=text, ga_name=ga_name, meta=meta)
     db.add(m)
@@ -83,6 +87,45 @@ def create_ticket(db, sess: ChatSession, question: str) -> Ticket:
     return t
 
 
+def create_message_ticket(db, sess: ChatSession, question: str, person) -> Ticket:
+    """"Leave a message" for a specific person, found through the directory resolver.
+    Unlike a normal handoff, the deadline is the end of the current shift (not 5 minutes)
+    since nobody needs to drop what they're doing - but it still goes through the exact
+    same escalate_overdue() chain so it can't be forgotten."""
+    on_shift = schedule.on_shift_now()
+    lead = lead_ga()
+    shift_end = schedule.current_shift_end()
+    deadline = _to_naive_utc(shift_end) if shift_end else None
+    t = Ticket(session_id=sess.id, question=question.strip()[:2000], on_shift=[g.name for g in on_shift],
+              kind="message", recipient_person_id=person.id, deadline_at=deadline)
+    db.add(t)
+    db.flush()
+
+    first = sess.visitor_name.split()[0] if sess.visitor_name else "there"
+    say(db, sess.id, "system", f"Thanks {first}. I'll make sure a GA passes this message on to {person.name}.")
+    if not on_shift:
+        t.escalated_at = utcnow()  # nobody on shift: alert the lead immediately, same as a normal handoff
+
+    mention = list(on_shift)
+    if lead and lead not in mention and (settings.LEAD_ALERT_ON_EVERY_HANDOFF or not on_shift):
+        mention.append(lead)
+    teams.post(teams.build_card(
+        title=f"Message for {person.name}",
+        mention=mention,
+        body_text=f"“{t.question}”",
+        lines=[
+            ("Visitor", sess.visitor_name or "Not given"),
+            ("For", person.name),
+            ("On shift", ", ".join(t.on_shift) or "Nobody"),
+            ("Ticket", f"#{t.id} at {local(t.created_at).strftime('%I:%M %p')}"),
+        ],
+        buttons=[("Open and respond", ticket_url(t.id))],
+        style="default" if on_shift else "urgent",
+    ))
+    db.commit()
+    return t
+
+
 # ---------- GA responses from the console ----------
 
 def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = None, text: str | None = None) -> None:
@@ -120,9 +163,14 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
 # ---------- periodic work, called by an external cron every minute ----------
 
 def escalate_overdue(db) -> int:
-    cutoff = utcnow() - timedelta(minutes=settings.ESCALATE_AFTER_MINUTES)
-    overdue = db.scalars(select(Ticket).where(Ticket.status == "waiting", Ticket.first_response_at.is_(None),
-                                              Ticket.escalated_at.is_(None), Ticket.created_at <= cutoff)).all()
+    now = utcnow()
+    candidates = db.scalars(select(Ticket).where(Ticket.status == "waiting", Ticket.first_response_at.is_(None),
+                                                 Ticket.escalated_at.is_(None))).all()
+    # A message ticket's deadline is the end of the current shift, stored on the row at
+    # creation; a normal visitor ticket has no stored deadline, so it falls back to the
+    # fixed ESCALATE_AFTER_MINUTES window (same behavior as before this existed).
+    overdue = [t for t in candidates
+              if (t.deadline_at or t.created_at + timedelta(minutes=settings.ESCALATE_AFTER_MINUTES)) <= now]
     lead = lead_ga()
     for t in overdue:
         sess = db.get(ChatSession, t.session_id)

@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 
 from . import directory, knowledge, llm, schedule, teams, tickets
 from .config import BASE_DIR, load_team, settings
-from .db import ChatSession, Doc, Message, QueryLog, SessionLocal, Ticket, init_db, utcnow
+from .db import ChatSession, Doc, Message, Person, QueryLog, SessionLocal, Ticket, init_db, utcnow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("virtual_ga")
@@ -118,6 +118,7 @@ class HandoffIn(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     phone: str | None = Field(None, max_length=40)
     consent: bool = False
+    message_for_person_id: int | None = None
 
 
 class ContactIn(BaseModel):
@@ -247,7 +248,13 @@ def handoff(sid: str, body: HandoffIn, db=Depends(get_db)):
     sess.visitor_name = body.name.strip()
     sess.visitor_phone = phone
     sess.phone_consent = bool(phone and body.consent)
-    t = tickets.create_ticket(db, sess, body.question)
+    if body.message_for_person_id:
+        person = db.get(Person, body.message_for_person_id)
+        if not person:
+            raise HTTPException(400, "That person wasn't found.")
+        t = tickets.create_message_ticket(db, sess, body.question, person)
+    else:
+        t = tickets.create_ticket(db, sess, body.question)
     return {"ticket_id": t.id}
 
 

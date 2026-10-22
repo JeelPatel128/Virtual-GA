@@ -32,6 +32,7 @@ TITLE_WORD_RE = re.compile(r"\b(professor|prof|dr|doctor|dean|mr|ms|mrs)\b", re.
 TITLE_WORDS = ["professor", "prof", "dr", "doctor", "dean", "mr", "ms", "mrs"]
 EXTENSION_RE = re.compile(r"\b(extension|ext\.?|phone\s*number|office\s*number)\b", re.I)
 EMAIL_RE = re.compile(r"\bemail\b", re.I)
+AVAILABILITY_RE = re.compile(r"\bavailable\b|\b(is|are)\b[\s\w]*\b(in|here|around)\b", re.I)
 PRONOUN_RE = re.compile(r"\b(he|she|him|her|his|hers|they|them|their)\b", re.I)
 
 # Common English words that are ALSO plausible first/last names in the real directory data.
@@ -362,6 +363,12 @@ def _not_found_answer() -> dict:
 
 
 def _format_person_answer(p: "Person", text: str, show_extensions: bool) -> dict:
+    if AVAILABILITY_RE.search(text) and not EXTENSION_RE.search(text) and not EMAIL_RE.search(text):
+        # Never claim someone is in right now - offer to check or leave a message instead.
+        answer = f"{p.name}: office hours are {p.office_hours}, but they may be in class or a meeting."
+        return {"answer": answer,
+                "meta": {"availability_buttons": True, "person_id": p.id, "person_name": p.name}}
+
     meta: dict = {"offer_handoff": False}
     lead = f"{p.name}, {p.title}."
     if p.building == "Babbio Center" and p.directions:

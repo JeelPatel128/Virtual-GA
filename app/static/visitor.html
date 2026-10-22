@@ -91,6 +91,12 @@ function addMsg(m) {
     const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = "Yes, get a GA";
     b.onclick = () => openSheet(); el.appendChild(b);
   }
+  if (meta.availability_buttons && !ticket) {
+    const check = document.createElement("button"); check.className = "btn small offer"; check.textContent = "Ask a GA to check";
+    check.onclick = () => openSheet(); el.appendChild(check);
+    const msg = document.createElement("button"); msg.className = "btn small offer"; msg.textContent = "Leave a message";
+    msg.onclick = () => openSheet({ id: meta.person_id, name: meta.person_name }); el.appendChild(msg);
+  }
   (meta.choices || []).forEach(choice => {
     const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = choice.label;
     b.onclick = async () => {
@@ -167,12 +173,16 @@ $("askForm").onsubmit = async (e) => {
   $("sendBtn").disabled = false; await poll(); $("q").focus();
 };
 
-function openSheet() {
-  $("hQ").value = lastVisitorQ; $("hErr").textContent = "";
+let messageForPerson = null; // { id, name } set when "Leave a message" started the sheet
+
+function openSheet(forMessage) {
+  messageForPerson = forMessage || null;
+  $("hQ").value = messageForPerson ? `Is ${messageForPerson.name} in right now?` : lastVisitorQ;
+  $("hErr").textContent = "";
   $("hName").value = load("vga_name") || "";
   $("sheetBg").style.display = "flex"; $("hName").focus();
 }
-$("gaLink").onclick = openSheet;
+$("gaLink").onclick = () => openSheet();
 $("hCancel").onclick = () => $("sheetBg").style.display = "none";
 $("handoffForm").onsubmit = async (e) => {
   e.preventDefault();
@@ -180,7 +190,8 @@ $("handoffForm").onsubmit = async (e) => {
   $("hSubmit").disabled = true;
   try {
     await api(`/api/session/${sid}/handoff`, { method: "POST", body: JSON.stringify({
-      name: $("hName").value, question: $("hQ").value, phone: phone || null, consent: $("hConsent").checked }) });
+      name: $("hName").value, question: $("hQ").value, phone: phone || null, consent: $("hConsent").checked,
+      message_for_person_id: messageForPerson ? messageForPerson.id : null }) });
     store("vga_name", $("hName").value); if (phone) store("vga_phone", "1");
     $("sheetBg").style.display = "none"; await poll();
   } catch (err) { $("hErr").textContent = err.message; }

@@ -74,6 +74,13 @@ def next_shift(now: datetime | None = None) -> dict | None:
     return upcoming[0] if upcoming else None
 
 
+def current_shift_end(now: datetime | None = None) -> datetime | None:
+    """Latest end time among shifts covering `now`, for a message ticket's deadline."""
+    now = now or datetime.now(TZ)
+    active = [s for s in shifts_between(now, now + timedelta(minutes=1)) if s["gas"]]
+    return max((s["end"] for s in active), default=None)
+
+
 def status() -> dict:
     """For the admin page: is the calendar connected and what does today look like."""
     now = datetime.now(TZ)

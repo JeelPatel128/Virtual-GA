@@ -447,6 +447,50 @@ def test_common_word_gate_faq_regression():
     print(f"FAQ regression test passed ({len(FAQ_REGRESSION_QUESTIONS)} questions)")
 
 
+def test_message_ticket_deadline_and_escalation():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        last = _ask_text(c, sid, "is Howie in today")
+        assert last["meta"].get("availability_buttons") is True, last
+        person_id = last["meta"]["person_id"]
+
+        teams.sent_cards.clear()
+        r = c.post(f"/api/session/{sid}/handoff", json={
+            "name": "Alex Visitor", "question": "Is Howie in right now?",
+            "message_for_person_id": person_id})
+        assert r.status_code == 200, r.text
+        tid = r.json()["ticket_id"]
+        card = teams.sent_cards[-1]
+        assert title(card) == "Message for Haoying Xu", card
+
+        from app.db import utcnow as db_utcnow
+        db = SessionLocal()
+        t = db.get(Ticket, tid)
+        assert t.kind == "message" and t.recipient_person_id == person_id
+        assert t.deadline_at is not None
+        minutes_out = (t.deadline_at - db_utcnow()).total_seconds() / 60
+        assert minutes_out > 60, "deadline should be the end of the ~3hr shift window, not +5 min"
+
+        # make it overdue and confirm the normal escalation chain picks it up (call
+        # escalate_overdue directly, not the combined /tasks/tick, so this doesn't also
+        # trip the once-a-day digest flag and leak that into a later test)
+        t.deadline_at = db_utcnow() - timedelta(minutes=1)
+        db.commit()
+        teams.sent_cards.clear()
+        assert tickets.escalate_overdue(db) == 1
+        esc = next(card for card in teams.sent_cards if title(card).startswith("No response after"))
+        assert mentions(esc) == ["jp@stevens.edu"], esc
+
+        # delete, not just resolve: digest_data() aggregates ALL of today's tickets
+        # regardless of status, and this row is disposable test fixture data that would
+        # otherwise inflate test_full_flow()'s own handoffs/escalated counts for "today"
+        db.delete(db.get(Ticket, tid))
+        db.commit(); db.close()
+    print("message ticket deadline/escalation test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -610,4 +654,5 @@ if __name__ == "__main__":
     test_route_topics_here_excludes_from_role_matching()
     test_place_matching()
     test_common_word_gate_faq_regression()
+    test_message_ticket_deadline_and_escalation()
     test_full_flow()

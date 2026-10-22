@@ -261,6 +261,43 @@ def _role_candidates(db, text: str) -> list[tuple["Person", float]]:
     return sorted(hits, key=lambda h: h[1], reverse=True)
 
 
+PLACE_HIGH = 0.72  # lower bar than names: place phrases are short and more generic
+# Deliberately NOT reusing NAME_FILLER_WORDS: "room"/"office" are noise for a person's NAME
+# but the actual distinguishing word for a place ("room 414" vs bare "414" wouldn't match
+# the "Room 414" candidate string at all once "room" is stripped - caught during testing).
+PLACE_FILLER_WORDS = set("where whats what please can could find looking around here there is are the a an s".split())
+
+
+def _place_candidates(db, text: str) -> list[tuple["Room", float]]:
+    words = [w for w in _norm(text) if len(w) > 1 and w not in PLACE_FILLER_WORDS]
+    if not words:
+        return []
+    rooms = db.scalars(select(Room).where(Room.active.is_(True))).all()
+    if not rooms:
+        return []
+    for phrase in _ngrams(words):
+        hits = []
+        for r in rooms:
+            cand = " ".join(w for w in _norm(r.place) if len(w) > 1)
+            if not cand:
+                continue
+            score = 1.0 if cand == phrase else SequenceMatcher(None, phrase, cand).ratio()
+            if score >= PLACE_HIGH:
+                hits.append((r, score))
+        if hits:
+            log.info("directory.resolve place query=%r phrase=%r candidates=%s", text, phrase,
+                     [(h[0].place, round(h[1], 3)) for h in hits])
+            return sorted(hits, key=lambda h: h[1], reverse=True)
+    return []
+
+
+def _format_place_answer(r: "Room") -> dict:
+    if r.directions_from_front_desk:
+        return {"answer": r.directions_from_front_desk, "meta": {"images": ["/api/directory/floor-map"]}}
+    return {"answer": f"I don't have directions to {r.place} yet. A GA can help.",
+            "meta": {"offer_handoff": True}}
+
+
 def _looks_person_ish(text: str) -> bool:
     """Minimal structural signal for now; refined with the common-word gate later."""
     return bool(TITLE_WORD_RE.search(text))
@@ -323,6 +360,12 @@ def resolve(db, sess, text: str) -> dict | None:
     person question at all, in which case the caller should fall through to the AI/knowledge
     base. Never invents a person: zero credible candidates with a person-ish signal present
     means "couldn't find them, offer a GA" rather than silently falling through."""
+    # 0. place lookups have their own vocabulary (lounge, washroom, room 4xx, ...) and run
+    # independently of the person-ish gating below.
+    place_hits = _place_candidates(db, text)
+    if place_hits:
+        return _format_place_answer(place_hits[0][0])
+
     # 1. exact/fuzzy name or alias match
     name_hits = _name_candidates(db, text)
     strong = [c for c in name_hits if c[1] >= NAME_HIGH]

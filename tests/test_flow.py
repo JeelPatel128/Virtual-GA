@@ -151,8 +151,20 @@ DIRECTORY_FIXTURE_CSV = PEOPLE_CSV_HEADER + "\n" + "\n".join([
 ])
 
 
+ROOMS_FIXTURE_CSV = "place,directions_from_front_desk\n" + "\n".join([
+    'Lounge,"The Lounge is on your right, a little behind you."',
+    'Washrooms,"The washrooms are on your left, past office 414."',
+    'Conference Room 431,"Conference Room 431 is on your right, just ahead of the front desk."',
+    '401 offices,"The 401 offices are right behind the front desk."',
+    '433 offices,"The 433 offices are the block right behind the lab."',
+    'Room 414,"414 is just before the washrooms."',
+])
+
+
 def _import_directory_fixture(c) -> None:
     r = c.post("/api/admin/directory/import", headers=A, files={"file": ("dir.csv", DIRECTORY_FIXTURE_CSV, "text/csv")})
+    assert r.status_code == 200, r.text
+    r = c.post("/api/admin/rooms/import", headers=A, files={"file": ("rooms.csv", ROOMS_FIXTURE_CSV, "text/csv")})
     assert r.status_code == 200, r.text
 
 
@@ -338,6 +350,29 @@ def test_route_topics_here_excludes_from_role_matching():
     print("route_topics_here exclusion test passed")
 
 
+def test_place_matching():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        last = _ask_text(c, sid, "where's the lounge")
+        assert "Lounge is on your right" in last["text"], last
+        assert last["meta"].get("images") == ["/api/directory/floor-map"], last
+
+        last = _ask_text(c, sid, "where's the washroom")
+        assert "washrooms are on your left" in last["text"], last
+
+        last = _ask_text(c, sid, "room 414")
+        assert "414 is just before" in last["text"], last
+
+        last = _ask_text(c, sid, "401 offices")
+        assert "401 offices are right behind" in last["text"], last
+
+        last = _ask_text(c, sid, "433 offices")
+        assert "433 offices are the block" in last["text"], last
+    print("place matching test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -499,4 +534,5 @@ if __name__ == "__main__":
     test_remembered_person_pronoun_followup()
     test_role_matching()
     test_route_topics_here_excludes_from_role_matching()
+    test_place_matching()
     test_full_flow()

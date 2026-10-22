@@ -43,7 +43,7 @@ Legend: **[JP]** = you do it (accounts, approvals, content, decisions). **[CC]**
 | # | Who | Task | Done when |
 |---|---|---|---|
 | 2.1 | JP | Ask SSB staff for their top 10 weekly questions and the docs and links they point people to | Shared sheet of Q&As |
-| 2.2 | CC | Build a **bulk CSV import** (question, answer, tags) on the admin page, plus an **edit Q&A** button (right now you can only delete) | Import 50 rows in one go |
+| 2.2 | CC | Build a **bulk CSV import** (question, answer, tags) on the admin page, plus an **edit Q&A** button (right now you can only delete) | ✅ Superseded by the richer 12-column FAQ bulk import built as Reliability pack group 13 (`#reliability-pack`) — same two asks (bulk import + edit button), bigger schema |
 | 2.3 | JP | Write down 25 real test questions people have asked at the desk, with the correct answer for each | `tests/eval_questions.csv` |
 | 2.4 | CC | Build an **eval script** that runs those questions through the bot and reports correct, wrong and "not sure". Tune retrieval and the prompt until wrong answers are near zero | Report: X/25 correct, 0 confidently wrong |
 | 2.5 | JP | Upload the floor maps, flyers and any how-to videos | |
@@ -64,20 +64,39 @@ Legend: **[JP]** = you do it (accounts, approvals, content, decisions). **[CC]**
 
 **Known limitation carried over:** the Arpan Josa-vs-front-desk calendar-color issue from Phase 0 (`#phase-0`) is unrelated to this feature but still unresolved - his calendar titling still needs a fix on the Google Calendar side.
 
-## Reliability pack (2026-10-22, spec from outside this repo — pending, build first)
+## Reliability pack (2026-10-22 spec, built 2026-10-22, 15 groups / 18 commits)
 
-JP's spec not pasted yet. Named scope so far: task requests, claim, reminder ladder, shift
-handoff, requester confirmation. Existing-code assessment below, done *before* building so
-nothing gets rebuilt — recheck each line once the real spec lands, since names alone can hide
-a different shape of requirement.
+Manager requirements: GA work never falls back to the office manager, and a forgotten
+item keeps getting reminded about until it's done or reassigned. **Groups 1–8 are on
+`main`** (pushed, piloted). **Groups 9–15 are on `reliability-pack-2`** only, pending JP's
+pilot results — not merged to `main` yet.
 
-| Named item | Exists today? | What's actually there |
-|---|---|---|
-| Task requests | ⚠️ Partial | A visitor's handoff creates a `Ticket` (`app/tickets.py::create_ticket`/`create_message_ticket`). If "task" means something broader than a visitor-initiated request (e.g. a GA-to-GA task), that doesn't exist. |
-| Claim | ❌ No | Any GA holding `GA_KEY` can act on any open ticket (`ga_action`). There's no lock/claim step, so two GAs could both respond to the same ticket with no conflict warning. |
-| Reminder ladder | ⚠️ Partial | One escalation stage exists: unanswered after `ESCALATE_AFTER_MINUTES` (5 min) → alert the lead (`escalate_overdue`), or end-of-shift for a message ticket. That's a single rung, not a multi-step ladder (e.g. reminders at 5/15/30 min) unless the spec means exactly this. |
-| Shift handoff | ❌ No | Nothing notifies a GA or hands off open tickets when their shift ends. `schedule.current_shift_end()` (built for the message-ticket deadline) could be reused here. |
-| Requester confirmation | ❌ No | `resolve` sends the visitor a "marked resolved" message, but nothing asks the visitor to confirm their issue is actually settled. |
+| # | Group | Branch | Status |
+|---|---|---|---|
+| 1 | Status/ownership/deadline schema + migration | `main` | ✅ Done, verified against Supabase |
+| 2 | Claim mechanism (DB-atomic, single owner) | `main` | ✅ Done |
+| 3 | Status model cutover (`new → claimed → in_progress → done\|cancelled`) | `main` | ✅ Done |
+| 4 | "On my way" deadline + visitor confirmation prompt | `main` | ✅ Done |
+| 5 | Structured snooze (30 min / 2 h / end of shift / tomorrow 10 AM + reason, 3rd auto-reassigns) | `main` | ✅ Done |
+| 6 | Reminder ladder (4 steps, catch-up sends one card naming missed steps) | `main` | ✅ Done |
+| 7 | Shift end: heads-up + conditional reassignment (only if the owner won't be back in time) | `main` | ✅ Done |
+| 8 | Shift start: on-shift diff, first-tick-ever sends nothing | `main` | ✅ Done |
+| 9 | Task requests: visitor form, file upload (Supabase Storage/local fallback), 30-min heads-up | `reliability-pack-2` | ✅ Done |
+| 10 | File privacy: delete on done/cancelled, 14-day sweep | `reliability-pack-2` | ✅ Done |
+| 11 | Requester confirmation page (signed `/status/{id}`, optional SMTP email) | `reliability-pack-2` | ✅ Done |
+| 12 | Reports: digest additions (open by owner, overdue, done today) + weekly GA report | `reliability-pack-2` | ✅ Done |
+| 13 | FAQ bulk import (12-column CSV, upsert by id, Task-type redirect) | `reliability-pack-2` | ✅ Done. **Needs a real-data check**: JP is placing the real 50-row `data/virtual-ga-faq.csv` (gitignored) — expected 9 import (8 "Draft, verify" + 1 "Suggested wording"), 41 skipped as "Needs answer". Verified so far against a synthetic fixture only; run the import against the real file once it lands. |
+| 14 | "Today at SSB" note (KV-backed, midnight America/New_York expiry) | `reliability-pack-2` | ✅ Done |
+| 15 | Docs (this update) + final test run | `reliability-pack-2` | ✅ Done |
+
+**Design choices worth knowing about:**
+- Every open thing — a visitor handoff, a message for someone specific, a task request —
+  is the same `Ticket`, one status/ownership/deadline model, not three parallel systems.
+- The reminder ladder and every alert in this pack only ever mention `team.json` names,
+  never the SSB staff directory (`app/directory.py`) — a dedicated test enforces this.
+- Task files: Supabase Storage (private bucket, signed URLs, GA-console only) if
+  `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` are set, else a local DB table — same
+  degrade-gracefully pattern as Gemini without a key.
 
 ## Sustainability pack (2026-10-22, spec from outside this repo — pending)
 
@@ -91,13 +110,8 @@ expiry, runbook.
 | Content expiry | ❌ No | No mechanism flags or expires stale knowledge-base Q&As or directory rows. The directory's `last_verified` column (a per-row date) exists as raw data but nothing acts on it yet. |
 | Runbook | ❌ No | README.md is setup instructions, not an incident/operational runbook. |
 
-**FAQ bulk import (explicitly asked about):** Not built. The only admin content-import paths
-are `/api/admin/qa` (one Q&A at a time), `/api/admin/directory/import`, `/api/admin/rooms/import`,
-and `/api/admin/emails/import` (email candidates) — none handle the 12-column schema you
-described (`id, category, type, question, variants, asked_by, times_mentioned, answer, source,
-handled_by, changes_each_semester, status`). Note this is a materially richer schema than
-TASKS.md's own Phase 2.2 placeholder ("bulk CSV import: question, answer, tags" — also not
-built), so treat it as superseding 2.2 rather than the same task, unless you say otherwise.
+**FAQ bulk import:** ✅ Built as Reliability pack group 13 (`#reliability-pack`,
+`reliability-pack-2` branch), superseding Phase 2.2 above with the full 12-column schema.
 
 ## Phase 3: Pilot (internal, before the QR goes on the desk)
 

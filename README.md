@@ -7,18 +7,19 @@ A QR-code chat assistant for the front desk. It answers common questions from a 
 **For visitors** (scan the QR code, nothing to install)
 - Ask questions and get answers drawn only from your knowledge base. It says "not sure" instead of guessing.
 - Tap **Get a GA** to leave their name, their question and, optionally, a phone number (with consent).
-- See live updates: "Riya is on the way, about 5 minutes", "tied up, will call you back", and direct replies from the GA.
+- Tap **Request something from the GAs** for a print job, room setup, delivery or anything else that isn't a question - with an optional file attachment, a due date, and a copy count.
+- See live updates: "on the way, about 5 minutes", "tied up, will call you back", and direct replies from the GA. Once a task is marked done, a signed link lets the requester say whether it was actually taken care of.
 
 **For GAs**
 - A Teams card in the team channel @mentions whoever is on shift, according to the Google Calendar.
-- One tap opens the GA console, with buttons for **On my way (2/5/10 min)**, **Busy, I'll follow up**, **Reply**, and **Mark resolved**.
+- One tap opens the GA console, with **Claim** (so exactly one GA owns an item - a second claim attempt is rejected), **On my way (2/5/10 min)**, a structured **Busy, follow up in...** picker (30 min / 2 h / end of shift / tomorrow 10 AM, with a required reason), **Reply**, and **Mark resolved**.
+- The console's **Today at SSB** field is where you note anything happening today (an event, a closure) that visitors might ask about - it clears itself at midnight.
 
 **For you, the lead**
-- You're @mentioned on every handoff (set `LEAD_ALERT_ON_EVERY_HANDOFF=false` to turn this off).
-- If no GA responds within **5 minutes**, you get a red escalation card with a link to respond yourself.
-- If nobody is on shift, you're alerted immediately and the visitor is told honestly.
-- A **daily digest** posts at 5 PM: question counts, how many the bot answered, handoffs, escalations, average response time, and the list of questions it couldn't answer.
-- The admin page (`/admin`) lets you add Q&As, upload PDFs, Word files, images and videos, check the schedule, see today's numbers, and print the QR code.
+- No GA work ever falls back to the office manager: every open item (a visitor handoff, a message for someone specific, or a task request) has a single owner and a deadline, and a forgotten one keeps getting reminded about - first the owner, then more urgently, then you, then the whole team - until it's done or reassigned. The exact same reminder chain also runs when nobody has claimed an item yet, targeting whoever is actually on shift at that moment.
+- A GA's open items are never silently dropped: ending a shift hands off anything that can't wait for their next shift, and a new shift starting gets a card listing what's open.
+- A **daily digest** posts at 5 PM: question counts, how many the bot answered, handoffs, overdue items, items closed that day, and the list of questions it couldn't answer. A **weekly report** posts Monday mornings: missed deadlines, snoozes, reassignments and average time-to-done, per GA.
+- The admin page (`/admin`) lets you add Q&As (one at a time or in bulk via CSV), upload PDFs, Word files, images and videos, check the schedule, see today's and this week's numbers, and print the QR code.
 
 ## How it's built (all free tiers)
 
@@ -81,7 +82,7 @@ Render's free tier sleeps after about 15 idle minutes. A sleeping server can't e
 1. Create a free account at cron-job.org.
 2. Add a job that GETs `https://YOUR-APP.onrender.com/tasks/tick?key=YOUR_CRON_SECRET` **every minute**.
 
-This one job escalates overdue tickets, sends the 5 PM digest, deletes phone numbers after 30 days, and keeps the server awake.
+This one job runs the reminder ladder, shift handoff/start, task heads-ups, the 5 PM digest and Monday's weekly report, deletes phone numbers after 30 days and old task files after 14, and keeps the server awake.
 
 > Free-tier limits (Render hours, Gemini requests per day, Supabase pausing) change over time. Check each provider's current limits before launch.
 
@@ -100,6 +101,16 @@ The bot is only as good as what you feed it. Ask SSB staff:
 
 Then:
 - **Add each one as a Q&A**, with one question and one clear answer. This works better than long documents.
+- Already have a spreadsheet? **FAQ bulk import** on the Knowledge tab reads a CSV with
+  exact columns `id,category,type,question,variants,asked_by,times_mentioned,answer,source,
+  handled_by,changes_each_semester,status`, matched by header name so a reordered file
+  still works. It shows a preview (what will import, what will be skipped) before you
+  confirm. Rows with `status` = "Needs answer" are skipped. Re-importing the same `id`
+  updates that row instead of creating a duplicate. `variants` (alternate phrasings,
+  separated by ` | `) make a Q&A findable by more than one way of asking, without
+  cluttering the displayed answer. A row with `type` = "Task" offers the visitor the
+  task-request form instead of answering normally, once its match is confident enough.
+- Click **Edit** on any existing Q&A to update it in place, rather than deleting and re-adding.
 - Upload maps, flyers and form screenshots as **images**.
 - Check **Today** in `/admin` (or the daily digest) for questions it couldn't answer, and click **Answer this** to turn each one into a Q&A.
 - Use **Test what it finds** to check that a question pulls up the right content.
@@ -149,6 +160,43 @@ anyone left out gets nothing rather than a guess. Upload the output on the **Dir
 tab's **Import found emails** form, then approve or reject each one under **Review
 emails** - nothing reaches the live directory unapproved.
 
+## Task requests, the reminder ladder, and reports
+
+Every open item - a visitor handoff, a message left for someone specific, or a task
+request - is the same underlying `Ticket`, unified under one status model
+(`new → claimed → in_progress → done | cancelled`) and one ownership/deadline/reminder
+mechanism, so nothing needs a parallel system to stay on top of.
+
+**Claim** is enforced by the database itself (a single conditional update), not an
+application-level lock, so two GAs can never both end up owning the same item. Taking any
+action on an unclaimed item claims it automatically; after that, only the owner or the
+lead can act on it.
+
+**The reminder ladder** fires in four steps as an item goes further overdue: a reminder to
+the owner (or whoever's on shift, if unclaimed), a more urgent one, an alert to you as
+lead, then the whole team - each step firing exactly once, even if the server missed
+several ticks in a row (it names which steps it missed rather than sending one card per
+step). Nothing in this chain ever notifies anyone outside `team.json` - the SSB staff
+directory is never used for alerts.
+
+**Task requests** support one optional file attachment (PDF, Word, or an image, 10 MB by
+default - `TASK_FILE_MAX_MB`). Files live in Supabase Storage if `SUPABASE_URL` and
+`SUPABASE_SERVICE_KEY` are set (a private bucket, signed URLs generated only for the GA
+console, never posted to Teams); otherwise they fall back to a local database table. A
+file is deleted the moment its ticket is marked done or cancelled, with a 14-day sweep as
+a backstop for anything left open. The GA team gets a heads-up card 30 minutes before a
+task is due.
+
+**Requester confirmation:** once a task is marked done, its requester (if they left an
+email) can get a link - by email if `SMTP_HOST` is set, otherwise just the signed
+`/status/{id}` page itself - asking "was this taken care of?" Saying no reopens it to you
+as lead immediately, rather than waiting for a deadline to lapse.
+
+**Shift handoff:** 15 minutes before a GA's shift ends, they get a card listing their open
+items. At the actual end of shift, an item is only reassigned if its deadline falls before
+the owner's own next shift - if they'll be back in time, it stays with them. A newly
+started shift gets a card showing what's currently open.
+
 ## Running locally
 
 ```bash
@@ -171,20 +219,23 @@ python tests/test_flow.py
 
 ## Privacy and rules built in
 - Phone numbers are optional, require a consent checkbox, are never posted to Teams (only shown in the console), and are deleted after 30 days.
+- A task's attached file is deleted as soon as it's marked done or cancelled (14-day sweep as a backstop), and a signed GA-console link is the only way to open one - it's never posted to Teams.
 - The bot is instructed never to discuss grades, IDs, or financial or medical details, and to hand those requests to a human.
 - Visitors are limited to 30 bot questions per hour, which protects the free Gemini quota.
+- Every reminder, escalation and report stays inside `team.json` - the SSB staff directory is never used for alerts.
 - Get approval from your manager before putting the QR code on the desk, since the bot speaks on behalf of SSB.
 
 ## Project layout
 ```
-app/main.py         routes: visitor chat, GA console, admin, cron tick
-app/tickets.py      handoffs, GA actions, escalation (5-min or shift-end for a message), digest, phone cleanup
-app/knowledge.py    file reading, chunking, embeddings, search
+app/main.py         routes: visitor chat, GA console, admin, requester status page, cron tick
+app/tickets.py      claim, status model, reminder ladder, shift handoff, confirmation, digest, weekly report
+app/knowledge.py    file reading, chunking, embeddings, search, FAQ bulk import
 app/directory.py    person/place resolver: name, fuzzy, role matching; CSV upsert import
+app/storage.py      task-file attachments: Supabase Storage, with a local DB table fallback
 app/llm.py          Gemini: answers, embeddings, image and video reading
 app/schedule.py     Google Calendar shifts
 app/teams.py        Teams Adaptive Cards
-app/static/         visitor.html, ga.html, admin.html
+app/static/         visitor.html, ga.html, admin.html, status.html (requester confirmation)
 tools/find_emails.py  standalone script: finds public stevens.edu emails for the directory
 tests/test_flow.py  full end-to-end test
 ```

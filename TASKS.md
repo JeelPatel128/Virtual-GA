@@ -23,7 +23,7 @@ Legend: **[JP]** = you do it (accounts, approvals, content, decisions). **[CC]**
 - **Supabase: PASS.** Password re-encoding issue traced to a leftover `[YOUR-PASSWORD]`-style artifact; after JP reset the password, connected and created all 7 tables (`chunks`, `docs`, `kv`, `messages`, `query_log`, `sessions`, `tickets`).
 - **Gemini: PASS.** Real API calls succeeded (embeddings + `gemini-2.5-flash` generation). Reworded question answered correctly with high confidence; unrelated question correctly triggered "not sure." Current model names in `.env.example` are valid for this key — no change needed.
 - **Calendar: PASS** (initial check, before real roster). Connects and reads today's 3 shifts. "Jeel" matched "Jeel Patel" (placeholder data); "Shriya" and "Arpan" were unmatched since `team.json` still had placeholders at that point.
-- **Teams: PASS (delivery).** Test card sent via `/api/admin/test-teams` and confirmed by JP as posted to the GA group chat. The `@mention` target was still the placeholder lead email at that point, so it likely did not ping anyone for real — recheck now that `team.json` has the real lead email.
+- **Teams: PASS (delivery).** Test card sent via `/api/admin/test-teams` and confirmed by JP as posted to the GA group chat. The `@mention` target was still the placeholder lead email at that point, so it likely did not ping anyone for real — recheck now that `team.json` has the real lead email. **Rechecked 2026-10-22 with the real lead email (jpatel109@stevens.edu): card posted AND the @mention pinged JP for real.** Also reran the calendar check: all 3 of today's shifts now match a real GA (Shriya Urs, Jeel Patel, Arpan Gevariya) — the unmatched-shift gap above is resolved.
 - **Known limitation — Arpan / event color:** Google Calendar's "secret address in iCal format" export does not include per-event color at all (confirmed: Google's API exposes `colorId` but the iCal/ICS export drops it). So the brown-vs-blue convention (front desk vs. Josa) described by JP is invisible to this app — matching is title-text only. Arpan was added to `team.json` per JP's decision, which means **any calendar event titled "Arpan" will currently show him as on-shift for front desk, including Josa shifts**, and could get him paged by mistake. Fix needed: Arpan's Josa-shift events need a title that does not contain "Arpan" (e.g. use initials "AG" or omit the name), reserving the plain name for actual front-desk coverage.
 - **Tests:** `tests/test_flow.py` — ALL CHECKS PASSED (run four times across this session).
 - **Python 3.12 (render.yaml pin):** requirements install cleanly and the app imports fine on 3.12.7, tested in an isolated venv alongside the local 3.14 environment. No 3.14-only code.
@@ -63,6 +63,41 @@ Legend: **[JP]** = you do it (accounts, approvals, content, decisions). **[CC]**
 | 2b.9 | JP | Review and approve/reject each row in **Review emails** after running `tools/find_emails.py` | ⏳ Pending the real run |
 
 **Known limitation carried over:** the Arpan Josa-vs-front-desk calendar-color issue from Phase 0 (`#phase-0`) is unrelated to this feature but still unresolved - his calendar titling still needs a fix on the Google Calendar side.
+
+## Reliability pack (2026-10-22, spec from outside this repo — pending, build first)
+
+JP's spec not pasted yet. Named scope so far: task requests, claim, reminder ladder, shift
+handoff, requester confirmation. Existing-code assessment below, done *before* building so
+nothing gets rebuilt — recheck each line once the real spec lands, since names alone can hide
+a different shape of requirement.
+
+| Named item | Exists today? | What's actually there |
+|---|---|---|
+| Task requests | ⚠️ Partial | A visitor's handoff creates a `Ticket` (`app/tickets.py::create_ticket`/`create_message_ticket`). If "task" means something broader than a visitor-initiated request (e.g. a GA-to-GA task), that doesn't exist. |
+| Claim | ❌ No | Any GA holding `GA_KEY` can act on any open ticket (`ga_action`). There's no lock/claim step, so two GAs could both respond to the same ticket with no conflict warning. |
+| Reminder ladder | ⚠️ Partial | One escalation stage exists: unanswered after `ESCALATE_AFTER_MINUTES` (5 min) → alert the lead (`escalate_overdue`), or end-of-shift for a message ticket. That's a single rung, not a multi-step ladder (e.g. reminders at 5/15/30 min) unless the spec means exactly this. |
+| Shift handoff | ❌ No | Nothing notifies a GA or hands off open tickets when their shift ends. `schedule.current_shift_end()` (built for the message-ticket deadline) could be reused here. |
+| Requester confirmation | ❌ No | `resolve` sends the visitor a "marked resolved" message, but nothing asks the visitor to confirm their issue is actually settled. |
+
+## Sustainability pack (2026-10-22, spec from outside this repo — pending)
+
+JP's spec not pasted yet. Named scope so far: admin-managed settings, health checks, content
+expiry, runbook.
+
+| Named item | Exists today? | What's actually there |
+|---|---|---|
+| Admin-managed settings | ⚠️ Partial | One setting (`show_extensions`) is stored in the `KV` table and toggleable from `/admin`. Everything else (Gemini key, Teams webhook, etc.) is a `.env`/Render env var, not editable from the admin page. |
+| Health checks | ⚠️ Partial | `/healthz` is a trivial liveness check (`{"ok": true}`, no dependency checks). `/api/admin/status` separately reports `ai_enabled`/`teams_configured`/`calendar_configured`, but it's admin-authenticated, not a plain health endpoint. |
+| Content expiry | ❌ No | No mechanism flags or expires stale knowledge-base Q&As or directory rows. The directory's `last_verified` column (a per-row date) exists as raw data but nothing acts on it yet. |
+| Runbook | ❌ No | README.md is setup instructions, not an incident/operational runbook. |
+
+**FAQ bulk import (explicitly asked about):** Not built. The only admin content-import paths
+are `/api/admin/qa` (one Q&A at a time), `/api/admin/directory/import`, `/api/admin/rooms/import`,
+and `/api/admin/emails/import` (email candidates) — none handle the 12-column schema you
+described (`id, category, type, question, variants, asked_by, times_mentioned, answer, source,
+handled_by, changes_each_semester, status`). Note this is a materially richer schema than
+TASKS.md's own Phase 2.2 placeholder ("bulk CSV import: question, answer, tags" — also not
+built), so treat it as superseding 2.2 rather than the same task, unless you say otherwise.
 
 ## Phase 3: Pilot (internal, before the QR goes on the desk)
 

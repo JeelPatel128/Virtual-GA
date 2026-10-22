@@ -321,6 +321,23 @@ def test_role_matching():
     print("role matching test passed")
 
 
+def test_route_topics_here_excludes_from_role_matching():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        # Josa Balisi has route_topics_here=no: a role-shaped query for her topic must not
+        # surface her as "the person to handle this" (falls through, since the phrasing has
+        # no title word / name signal of its own).
+        last = _ask_text(c, sid, "who handles academic operations")
+        assert "Josa Balisi" not in last["text"], last
+
+        # her name/alias must still resolve normally - just not via the role path
+        last = _ask_text(c, sid, "Jose")
+        assert "Josa Balisi" in last["text"], last
+    print("route_topics_here exclusion test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -481,4 +498,5 @@ if __name__ == "__main__":
     test_disambiguation_buttons()
     test_remembered_person_pronoun_followup()
     test_role_matching()
+    test_route_topics_here_excludes_from_role_matching()
     test_full_flow()

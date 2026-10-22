@@ -38,6 +38,7 @@
     <button class="btn" id="sendBtn">Send</button>
   </form>
   <button class="ga-link" id="gaLink" type="button">Talk to a GA instead</button>
+  <button class="ga-link" id="taskLink" type="button">Request something from the GAs</button>
 </footer>
 
 <div class="sheet-bg" id="sheetBg">
@@ -55,6 +56,40 @@
     <div class="actions">
       <button type="button" class="btn quiet" id="hCancel">Cancel</button>
       <button class="btn" id="hSubmit">Alert a GA</button>
+    </div>
+  </form>
+</div>
+
+<div class="sheet-bg" id="taskBg">
+  <form class="sheet" id="taskForm">
+    <h2>Request something</h2>
+    <p class="hint">Print jobs, room setup, deliveries and more - send the GA team what you need.</p>
+    <label for="tName">Your name</label>
+    <input id="tName" type="text" maxlength="120" required>
+    <label for="tEmail">Email <span class="hint">(optional)</span></label>
+    <input id="tEmail" type="email" maxlength="200">
+    <label for="tType">What kind of request</label>
+    <select id="tType" required>
+      <option value="Print/copies">Print/copies</option>
+      <option value="Room setup">Room setup</option>
+      <option value="Delivery/pickup">Delivery/pickup</option>
+      <option value="Supplies/equipment">Supplies/equipment</option>
+      <option value="Other">Other</option>
+    </select>
+    <label for="tDetails">Details</label>
+    <textarea id="tDetails" rows="3" maxlength="2000" required></textarea>
+    <label for="tCopies">Copies</label>
+    <input id="tCopies" type="number" min="1" max="99" value="1">
+    <label for="tDue">Needed by</label>
+    <input id="tDue" type="datetime-local" required>
+    <label for="tPickup">Pickup location <span class="hint">(optional)</span></label>
+    <input id="tPickup" type="text" maxlength="200">
+    <label for="tFile">Attach a file <span class="hint">(PDF, Word, or image - 10 MB max, optional)</span></label>
+    <input id="tFile" type="file" accept=".pdf,.docx,image/*">
+    <div class="err" id="tErr"></div>
+    <div class="actions">
+      <button type="button" class="btn quiet" id="tCancel">Cancel</button>
+      <button class="btn" id="tSubmit">Send request</button>
     </div>
   </form>
 </div>
@@ -122,6 +157,7 @@ function showStatus() {
   if (label) { s.textContent = label; s.style.display = "block"; }
   else s.style.display = "none";
   $("gaLink").style.display = ticket ? "none" : "block";
+  $("taskLink").style.display = ticket ? "none" : "block";
   $("q").placeholder = ticket ? "Message the GA..." : "Type your question...";
   document.querySelectorAll(".offer").forEach(b => b.style.display = ticket ? "none" : "");
 }
@@ -220,6 +256,39 @@ $("handoffForm").onsubmit = async (e) => {
     $("sheetBg").style.display = "none"; await poll();
   } catch (err) { $("hErr").textContent = err.message; }
   $("hSubmit").disabled = false;
+};
+
+function openTaskSheet() {
+  $("tErr").textContent = "";
+  $("tName").value = load("vga_name") || "";
+  $("tEmail").value = ""; $("tType").value = "Print/copies"; $("tDetails").value = "";
+  $("tCopies").value = "1"; $("tPickup").value = ""; $("tFile").value = "";
+  const now = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+  $("tDue").min = now.toISOString().slice(0, 16); $("tDue").value = "";
+  $("taskBg").style.display = "flex"; $("tName").focus();
+}
+$("taskLink").onclick = () => openTaskSheet();
+$("tCancel").onclick = () => $("taskBg").style.display = "none";
+$("taskForm").onsubmit = async (e) => {
+  e.preventDefault();
+  $("tErr").textContent = ""; $("tSubmit").disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append("name", $("tName").value);
+    fd.append("email", $("tEmail").value);
+    fd.append("type", $("tType").value);
+    fd.append("details", $("tDetails").value);
+    fd.append("copies", $("tCopies").value || "1");
+    fd.append("due_at", $("tDue").value);
+    fd.append("pickup_location", $("tPickup").value);
+    if ($("tFile").files[0]) fd.append("file", $("tFile").files[0]);
+    const r = await fetch(`/api/session/${sid}/task`, { method: "POST", body: fd });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || "Something went wrong");
+    store("vga_name", $("tName").value);
+    $("taskBg").style.display = "none"; await poll();
+  } catch (err) { $("tErr").textContent = err.message; }
+  $("tSubmit").disabled = false;
 };
 
 start(false);

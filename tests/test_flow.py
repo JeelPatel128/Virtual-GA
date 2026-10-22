@@ -751,7 +751,7 @@ def test_full_flow():
         # GA console access
         assert c.get(f"/api/ga/ticket/{tid}?t=wrong").status_code == 401
         t = c.get(f"/api/ga/ticket/{tid}?t={token}").json()
-        assert t["visitor_phone"] == "2015550100" and t["status"] == "waiting"
+        assert t["visitor_phone"] == "2015550100" and t["status"] == "new"
         assert c.get("/api/ga/tickets").status_code == 401
         assert len(c.get("/api/ga/tickets", headers={"X-GA-Key": "gakey"}).json()["tickets"]) == 1
         assert c.get("/api/ga/team").status_code == 401
@@ -784,7 +784,10 @@ def test_full_flow():
         m = c.get(f"/api/session/{sid}/messages").json()
         assert "on the way to the front desk" in m["messages"][-1]["text"]
         assert "about 5 minutes" in m["messages"][-1]["text"]
-        assert m["ticket"]["status"] == "on_the_way"
+        assert m["ticket"]["status"] == "in_progress" and m["ticket"]["activity"] == "on_the_way"
+        # auto-claim made GA Two the owner; a different, non-lead GA is refused
+        other = c.post(f"/api/ga/ticket/{tid}/action?t={token}", json={"ga_name": "GA Three", "action": "reply", "text": "hi"})
+        assert other.status_code == 400 and "owns this ticket" in other.json()["detail"]
         act({"action": "reply", "text": "Be there in a sec, grab a seat!"})
         last = c.get(f"/api/session/{sid}/messages").json()["messages"][-1]
         assert last["sender"] == "ga" and last["ga_name"] == "GA Two"

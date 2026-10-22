@@ -12,9 +12,9 @@
   .wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
   .pill { display: inline-block; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--line); }
-  .pill.waiting { background: #fde2e2; color: #8a1c1c; }
-  .pill.on_the_way, .pill.replied { background: var(--ga); color: var(--ga-ink); }
-  .pill.follow_up { background: var(--sys); color: var(--sys-ink); }
+  .pill.new { background: #fde2e2; color: #8a1c1c; }
+  .pill.claimed, .pill.in_progress { background: var(--ga); color: var(--ga-ink); }
+  .pill.cancelled { background: var(--sys); color: var(--sys-ink); }
   .q { font-size: 18px; font-weight: 600; margin: 8px 0; }
   .facts { font-size: 14px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
   .facts a { font-weight: 700; }
@@ -54,7 +54,8 @@ async function api(path, opts = {}) {
   return d;
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const label = { waiting: "Waiting", on_the_way: "GA on the way", follow_up: "Follow up later", replied: "In conversation", resolved: "Resolved" };
+const label = { new: "New", claimed: "Claimed", in_progress: "In progress", done: "Done", cancelled: "Cancelled" };
+const activityLabel = { on_the_way: "On the way", busy: "Follow up later", replied: "In conversation" };
 const me = () => $("me").value;
 const fmtPhone = (p) => { const d = String(p).replace(/\D/g, ""); return d.length === 10 ? `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}` : p; };
 
@@ -84,34 +85,45 @@ async function act(action, extra = {}) {
   catch (e) { alert(e.message); }
 }
 
+async function claim() {
+  if (!me()) { alert("Pick your name at the top first."); return; }
+  const q = token ? `?t=${encodeURIComponent(token)}` : "";
+  try { await api(`/api/ga/ticket/${ticketId}/claim${q}`, { method: "POST", body: JSON.stringify({ ga_name: me() }) }); render(true); }
+  catch (e) { alert(e.message); }
+}
+
 async function ticketView(force) {
   const q = token ? `?t=${encodeURIComponent(token)}` : "";
   let t;
   try { t = await api(`/api/ga/ticket/${ticketId}${q}`); }
   catch (e) { if (e.status === 401 && !token) return loginView(key ? "Wrong key" : ""); app.innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
-  const sig = JSON.stringify([t.status, t.messages.length]);
+  const sig = JSON.stringify([t.status, t.owner, t.messages.length]);
   if (!force && sig === lastRender) return; lastRender = sig;
   const typing = $("replyText") ? $("replyText").value : "";
   $("title").textContent = `Ticket #${t.id}`;
-  const open = t.status !== "resolved";
+  const open = t.status !== "done" && t.status !== "cancelled";
+  const mine = !t.owner || t.owner === me();
   app.innerHTML = `
     <div class="card">
       <span class="pill ${t.status}">${label[t.status] || t.status}</span>
-      ${t.escalated ? '<span class="pill waiting">Escalated to lead</span>' : ""}
+      ${t.activity ? `<span class="hint">${esc(activityLabel[t.activity] || t.activity)}</span>` : ""}
+      ${t.escalated ? '<span class="pill new">Escalated to lead</span>' : ""}
       <div class="q">${esc(t.question)}</div>
       <div class="facts">
         <span>${esc(t.visitor_name || "No name")}</span>
         <span>${t.visitor_phone ? `<a href="tel:${esc(t.visitor_phone)}">${esc(fmtPhone(t.visitor_phone))}</a>` : "No phone left"}</span>
         <span>Asked ${esc(t.created_at)}</span>
-        ${t.responded_by ? `<span>Picked up by ${esc(t.responded_by)}</span>` : ""}
+        <span>${t.owner ? `Owner: ${esc(t.owner)}` : "Unclaimed"}</span>
       </div>
-      ${open ? `<div class="btns">
+      ${open && !t.owner ? `<div class="btns"><button class="btn" id="claimBtn">Claim</button></div>` : ""}
+      ${open && mine ? `<div class="btns">
         <button class="btn" data-a="on_my_way" data-m="2">On my way (2 min)</button>
         <button class="btn" data-a="on_my_way" data-m="5">On my way (5 min)</button>
         <button class="btn ghost" data-a="on_my_way" data-m="10">10 min</button>
         <button class="btn quiet" data-a="busy">Busy, I'll follow up</button>
         <button class="btn quiet" data-a="resolve">Mark resolved</button>
       </div>` : ""}
+      ${open && !mine ? `<p class="hint">Owned by ${esc(t.owner)} - only they or the lead can act on this.</p>` : ""}
     </div>
     <div class="card">
       <h3 style="margin:0 0 10px;font-size:15px">Conversation</h3>
@@ -131,6 +143,7 @@ async function ticketView(force) {
     if (b.dataset.a === "resolve" && !confirm("Mark this as resolved?")) return;
     act(b.dataset.a, b.dataset.m ? { minutes: +b.dataset.m } : {});
   });
+  if ($("claimBtn")) $("claimBtn").onclick = claim;
   if ($("replyForm")) {
     $("replyText").value = typing;
     $("replyForm").onsubmit = (e) => { e.preventDefault(); const text = $("replyText").value.trim(); if (text) { $("replyText").value = ""; act("reply", { text }); } };
@@ -159,7 +172,7 @@ async function listView(force) {
     (d.tickets.length ? d.tickets.map(t => `
     <a class="card list-item" href="/ga/ticket/${t.id}">
       <span class="pill ${t.status}">${label[t.status] || t.status}</span>
-      ${t.escalated ? '<span class="pill waiting">Escalated</span>' : ""}
+      ${t.escalated ? '<span class="pill new">Escalated</span>' : ""}
       <div class="q">${esc(t.question)}</div>
       <div class="facts"><span>${esc(t.visitor_name || "No name")}</span><span>${t.has_phone ? "Left a phone number" : "No phone"}</span>
       <span>${esc(t.created_at)} (${t.waiting_minutes} min ago)</span></div>

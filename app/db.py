@@ -85,7 +85,7 @@ class Ticket(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
     question: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(20), default="waiting", index=True)  # cut over to new/claimed/in_progress/done/cancelled in the status-model commit
+    status: Mapped[str] = mapped_column(String(20), default="new", index=True)
     on_shift: Mapped[list] = mapped_column(JSON, default=list)  # GA names on shift when created
     responded_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

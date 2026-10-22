@@ -113,9 +113,13 @@ function addMsg(m) {
 
 function showStatus() {
   const s = $("status");
-  const text = { waiting: "Waiting for a GA to respond...", on_the_way: "A GA is on the way.",
-                 follow_up: "A GA will follow up with you.", replied: "You're chatting with a GA." };
-  if (ticket && text[ticket.status]) { s.textContent = text[ticket.status]; s.style.display = "block"; }
+  // status drives ownership/escalation; activity is just which "in_progress" copy to show
+  const text = { new: "Waiting for a GA to respond...", claimed: "A GA has your request.",
+                 in_progress: { on_the_way: "A GA is on the way.", busy: "A GA will follow up with you.",
+                                replied: "You're chatting with a GA." } };
+  const entry = ticket && text[ticket.status];
+  const label = typeof entry === "string" ? entry : (entry && entry[ticket.activity]);
+  if (label) { s.textContent = label; s.style.display = "block"; }
   else s.style.display = "none";
   $("gaLink").style.display = ticket ? "none" : "block";
   $("q").placeholder = ticket ? "Message the GA..." : "Type your question...";
@@ -123,7 +127,7 @@ function showStatus() {
 }
 
 function maybeAskPhone(hasPhone) {
-  if (askedPhone || !ticket || ticket.status !== "follow_up") return;
+  if (askedPhone || !ticket || ticket.status !== "in_progress" || ticket.activity !== "busy") return;
   askedPhone = true;
   if (hasPhone) return;
   const box = document.createElement("form"); box.id = "phoneBox"; box.style.display = "block";
@@ -144,9 +148,10 @@ async function poll() {
   try {
     const d = await api(`/api/session/${sid}/messages?after=${lastId}`);
     d.messages.forEach(m => { lastId = Math.max(lastId, m.id); addMsg(m); });
-    const prev = ticket && ticket.status;
+    const prevBusy = ticket && ticket.status === "in_progress" && ticket.activity === "busy";
     ticket = d.ticket; showStatus();
-    if (ticket && ticket.status === "follow_up" && prev !== "follow_up") maybeAskPhone(!!load("vga_phone"));
+    const nowBusy = ticket && ticket.status === "in_progress" && ticket.activity === "busy";
+    if (nowBusy && !prevBusy) maybeAskPhone(!!load("vga_phone"));
   } catch (e) {
     if (String(e.message).includes("expired")) { store("vga_sid", ""); start(true); }
   }

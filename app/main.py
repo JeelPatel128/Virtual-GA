@@ -167,7 +167,7 @@ def get_messages(sid: str, after: int = 0, db=Depends(get_db)):
     msgs = db.scalars(select(Message).where(Message.session_id == sid, Message.id > after).order_by(Message.id)).all()
     t = tickets.open_ticket_for(db, sid)
     return {"messages": [_msg_json(m) for m in msgs],
-            "ticket": {"id": t.id, "status": t.status} if t else None}
+            "ticket": {"id": t.id, "status": t.status, "activity": t.activity} if t else None}
 
 
 @app.post("/api/session/{sid}/ask")
@@ -308,7 +308,7 @@ def _ticket_json(db, t: Ticket, full: bool) -> dict:
            "has_phone": bool(s.visitor_phone), "on_shift": t.on_shift, "responded_by": t.responded_by,
            "created_at": tickets.local(t.created_at).strftime("%a %I:%M %p"),
            "waiting_minutes": int((utcnow() - t.created_at).total_seconds() // 60),
-           "escalated": bool(t.escalated_at), "owner": t.owner}
+           "escalated": bool(t.escalated_at), "owner": t.owner, "activity": t.activity}
     if full:
         out["visitor_phone"] = s.visitor_phone
         msgs = db.scalars(select(Message).where(Message.session_id == t.session_id).order_by(Message.id)).all()
@@ -364,7 +364,7 @@ def ga_ticket_action(ticket_id: int, body: ActionIn, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t:
         raise HTTPException(404)
-    if t.status == "resolved":
+    if t.status == "done":
         raise HTTPException(409, "Already resolved")
     try:
         tickets.ga_action(db, t, body.ga_name.strip(), body.action, body.minutes, body.text)

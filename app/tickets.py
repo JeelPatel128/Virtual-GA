@@ -11,7 +11,9 @@ from .config import lead_ga, load_team, settings
 from .db import ChatSession, Message, QueryLog, Ticket, kv_get, kv_set, utcnow
 
 TZ = ZoneInfo(settings.TIMEZONE)
-OPEN_STATUSES = ("waiting", "on_the_way", "follow_up", "replied")
+# Unified across all three kinds (visitor/message/task). `activity` carries the old
+# visitor-facing nuance (on_the_way/busy/replied) that used to live in `status` itself.
+OPEN_STATUSES = ("new", "claimed", "in_progress")
 
 
 def ticket_token(ticket_id: int) -> str:
@@ -131,19 +133,27 @@ def create_message_ticket(db, sess: ChatSession, question: str, person) -> Ticke
 def claim_ticket(db, ticket_id: int, ga_name: str) -> bool:
     """True if this GA just became the owner; False if someone else already claimed it
     first. Enforced by the database itself - a single conditional UPDATE - not an
-    application-level lock, so a real race between two GAs can only ever have one
-    winner: whichever request the database engine applies first still matches
-    `owner IS NULL`, and the loser's WHERE clause no longer matches anything, so its
-    update (including the owner_history it computed) never takes effect."""
+    application-level lock: whichever request the database engine applies first is the
+    only one whose WHERE still matches `owner IS NULL`. Only that unconditional
+    owner/status write is inside the atomic statement; owner_history is a list-append,
+    which must never be built from a pre-read value that could be stale under a race -
+    so it's written as a separate step, and only once the atomic claim is confirmed to
+    have actually succeeded."""
     t = db.get(Ticket, ticket_id)
     if t is None:
         raise ValueError("Ticket not found")
-    entry = {"ga": ga_name, "assigned_at": utcnow().isoformat(), "unassigned_at": None, "reason": "claimed"}
-    new_history = (t.owner_history or []) + [entry]
-    result = db.execute(update(Ticket).where(Ticket.id == ticket_id, Ticket.owner.is_(None))
-                        .values(owner=ga_name, owner_history=new_history))
+    values = {"owner": ga_name}
+    if t.status == "new":
+        values["status"] = "claimed"
+    result = db.execute(update(Ticket).where(Ticket.id == ticket_id, Ticket.owner.is_(None)).values(**values))
     db.commit()
-    return result.rowcount == 1
+    if result.rowcount != 1:
+        return False
+    db.refresh(t)
+    t.owner_history = (t.owner_history or []) + [
+        {"ga": ga_name, "assigned_at": utcnow().isoformat(), "unassigned_at": None, "reason": "claimed"}]
+    db.commit()
+    return True
 
 
 def reassign_ticket(db, t: Ticket, to_ga: str, reason: str) -> None:
@@ -162,30 +172,46 @@ def reassign_ticket(db, t: Ticket, to_ga: str, reason: str) -> None:
 
 # ---------- GA responses from the console ----------
 
+def _is_lead(ga_name: str) -> bool:
+    lead = lead_ga()
+    return bool(lead and lead.name == ga_name)
+
+
 def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = None, text: str | None = None) -> None:
+    """Taking any action implies ownership: an unclaimed ticket is auto-claimed to
+    whoever acts on it first (claim_ticket is still atomic, so a genuine race between
+    two GAs both calling an action has the same single-winner guarantee as an explicit
+    claim). Once owned, only the owner or the lead may act further - everyone else gets
+    a clear error rather than silently stepping on the current owner."""
     sess = db.get(ChatSession, t.session_id)
     ga_first = ga_name.split()[0]
+
+    if t.owner is None:
+        claim_ticket(db, t.id, ga_name)
+        db.refresh(t)
+    if t.owner != ga_name and not _is_lead(ga_name):
+        raise ValueError(f"{t.owner} owns this ticket. Only they or the lead can act on it.")
+
     if t.first_response_at is None and action != "note":
         t.first_response_at = utcnow()
         t.responded_by = ga_name
 
     if action == "on_my_way":
-        t.status = "on_the_way"
+        t.status, t.activity = "in_progress", "on_the_way"
         eta = f" in about {minutes} minutes" if minutes else " shortly"
         say(db, t.session_id, "system", f"{ga_first} is on the way to the front desk and will be with you{eta}.")
     elif action == "busy":
-        t.status = "follow_up"
+        t.status, t.activity = "in_progress", "busy"
         how = "call you back at the number you left" if sess.visitor_phone else \
             "get back to you. Please leave a phone number below so they can reach you"
         say(db, t.session_id, "system", f"{ga_first} is tied up with something right now and will {how}.")
     elif action == "reply":
         if not text or not text.strip():
             raise ValueError("Reply is empty.")
-        if t.status == "waiting":
-            t.status = "replied"
+        t.status, t.activity = "in_progress", "replied"
         say(db, t.session_id, "ga", text.strip()[:2000], ga_name=ga_name)
     elif action == "resolve":
-        t.status = "resolved"
+        t.status = "done"
         t.resolved_at = utcnow()
         say(db, t.session_id, "system", "This request is marked as resolved. Thanks for stopping by! "
                                         "You can keep asking me questions anytime.")
@@ -198,7 +224,7 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
 
 def escalate_overdue(db) -> int:
     now = utcnow()
-    candidates = db.scalars(select(Ticket).where(Ticket.status == "waiting", Ticket.first_response_at.is_(None),
+    candidates = db.scalars(select(Ticket).where(Ticket.status == "new", Ticket.first_response_at.is_(None),
                                                  Ticket.escalated_at.is_(None))).all()
     # A message ticket's deadline is the end of the current shift, stored on the row at
     # creation; a normal visitor ticket has no stored deadline, so it falls back to the

@@ -50,6 +50,12 @@ class Settings:
     GCAL_ICS_URL = os.getenv("GCAL_ICS_URL", "")
     SCHEDULE_CACHE_MINUTES = int(os.getenv("SCHEDULE_CACHE_MINUTES", "5"))
 
+    # Task file attachments: Supabase Storage (private bucket, signed URLs, GA console
+    # only). If unset, falls back to a local DB table instead - see app/storage.py.
+    SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+    SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+    TASK_FILE_MAX_MB = int(os.getenv("TASK_FILE_MAX_MB", "10"))
+
     # Behaviour
     ESCALATE_AFTER_MINUTES = int(os.getenv("ESCALATE_AFTER_MINUTES", "5"))
     REMINDER_STEP_MINUTES = int(os.getenv("REMINDER_STEP_MINUTES", "15"))

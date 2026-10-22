@@ -108,10 +108,25 @@ class Ticket(Base):
     task: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {type, details, copies, pickup_location}
     file_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
     file_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)  # unused, see file_backend/file_ref
     requester_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
     confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Task file attachment: "supabase" (file_ref = storage object path) or "local"
+    # (file_ref = str(TaskFile.id)). Never file_bytes above - see app/storage.py.
+    file_backend: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    file_ref: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+class TaskFile(Base):
+    """Fallback file storage when Supabase Storage isn't configured. Bytes are only
+    loaded when a GA explicitly opens the file (app/main.py's dedicated endpoint) -
+    never pulled into a ticket-list or ticket-detail query."""
+    __tablename__ = "task_files"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id", ondelete="CASCADE"), index=True)
+    file_bytes: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class QueryLog(Base):
@@ -204,6 +219,8 @@ _MIGRATIONS = [
     ("tickets", "requester_email", "TEXT"),
     ("tickets", "confirmed", "BOOLEAN"),
     ("tickets", "confirmed_at", "TIMESTAMP"),
+    ("tickets", "file_backend", "TEXT"),
+    ("tickets", "file_ref", "TEXT"),
 ]
 
 

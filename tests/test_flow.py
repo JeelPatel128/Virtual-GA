@@ -88,7 +88,8 @@ def test_migration_adds_columns_to_old_tables():
     assert {"kind", "recipient_person_id", "deadline_at"} <= ticket_cols
     assert {"owner", "owner_history", "activity", "next_deadline", "last_reminder_step",
            "snooze_count", "due_at", "cancelled_reason", "task", "file_name", "file_mime",
-           "file_bytes", "requester_email", "confirmed", "confirmed_at"} <= ticket_cols
+           "file_bytes", "requester_email", "confirmed", "confirmed_at",
+           "file_backend", "file_ref"} <= ticket_cols
     eng.dispose()
 
 

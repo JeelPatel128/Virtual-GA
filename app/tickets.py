@@ -394,8 +394,79 @@ def send_digest(db, day_local: datetime | None = None) -> dict:
     return d
 
 
+def _next_owner_for_handoff() -> str | None:
+    on_shift = schedule.on_shift_now()
+    if on_shift:
+        return on_shift[0].name
+    lead = lead_ga()
+    return lead.name if lead else None
+
+
+def check_shift_ends(db) -> int:
+    """15 minutes before a GA's shift ends, they get a heads-up card listing their open
+    owned items (sent once per GA per shift-end, tracked in KV so it doesn't repeat every
+    tick during that window). At actual shift end, an item is only reassigned if its
+    deadline falls before the owner's own NEXT shift start - they genuinely can't make it
+    back in time. An item they'll be back for in time stays with them (still shown in the
+    heads-up card for visibility, not silently handed off).
+
+    shift_end_for() only finds a shift while it's still active, so by the moment a shift
+    has actually ended it can no longer be looked up that way. The end time is persisted
+    in KV while still observable and reused once it drops out of "currently active" -
+    without this, the actual-end-time branch below would never fire at all."""
+    now_local = datetime.now(TZ)
+    now = utcnow()
+    owners = {t.owner for t in db.scalars(
+        select(Ticket).where(Ticket.status.in_(OPEN_STATUSES), Ticket.owner.is_not(None))).all()}
+    acted = 0
+    for ga_name in owners:
+        owned = db.scalars(select(Ticket).where(Ticket.status.in_(OPEN_STATUSES), Ticket.owner == ga_name)).all()
+        if not owned:
+            continue
+
+        end_key = f"shiftend:{ga_name}"
+        shift_end_local = schedule.shift_end_for(ga_name, now_local)
+        if shift_end_local:
+            shift_end_utc = _to_naive_utc(shift_end_local)
+            kv_set(db, end_key, shift_end_utc.isoformat())
+        else:
+            stored = kv_get(db, end_key)
+            if not stored:
+                continue
+            shift_end_utc = datetime.fromisoformat(stored)
+        minutes_to_end = (shift_end_utc - now).total_seconds() / 60
+
+        headsup_key = f"shiftend_headsup:{ga_name}:{shift_end_utc.isoformat()}"
+        if 0 <= minutes_to_end <= 15 and not kv_get(db, headsup_key):
+            ga = _ga_by_name(ga_name)
+            lines = [(f"#{t.id}", t.question[:80]) for t in owned]
+            teams.post(teams.build_card(
+                title=f"Your shift ends in {int(minutes_to_end)} min - {len(owned)} open item(s)",
+                mention=[ga] if ga else [],
+                lines=lines,
+                buttons=[("Open and hand off or reschedule", ticket_url(t.id)) for t in owned[:5]],
+            ))
+            kv_set(db, headsup_key, "1")
+            acted += 1
+
+        if minutes_to_end <= 0:
+            next_shift = schedule.next_shift_for(ga_name, now_local)
+            next_start_utc = _to_naive_utc(next_shift["start"]) if next_shift else None
+            for t in owned:
+                cant_make_it = t.next_deadline and (next_start_utc is None or t.next_deadline < next_start_utc)
+                if cant_make_it:
+                    to_ga = _next_owner_for_handoff()
+                    if to_ga and to_ga != ga_name:
+                        reassign_ticket(db, t, to_ga, f"shift ended for {ga_name}, deadline before their next shift")
+                        say(db, t.session_id, "system", "Your request has been handed off to another GA.")
+                        acted += 1
+    db.commit()
+    return acted
+
+
 def tick(db) -> dict:
     result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0}
+    result["shift_ends_handled"] = check_shift_ends(db)
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
     if now.hour >= settings.DIGEST_HOUR and kv_get(db, "digest_date") != today:

@@ -272,6 +272,69 @@ def test_reminder_ladder_catchup_offshift_and_autoclaim():
     print("reminder ladder catch-up / off-shift / auto-claim test passed")
 
 
+def test_shift_end_headsup_and_conditional_reassignment():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        from app.db import Ticket as _Ticket, utcnow as db_utcnow
+
+        # --- heads-up: fires once when a shift is 15 min or less from ending ---
+        write_ics([("Desk: Two", now - timedelta(hours=2), now + timedelta(minutes=10))])
+        sid = c.post("/api/session").json()["session_id"]
+        tid = c.post(f"/api/session/{sid}/handoff", json={"name": "A", "question": "help A"}).json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
+        teams.sent_cards.clear()
+        db = SessionLocal()
+        assert tickets.check_shift_ends(db) == 1
+        assert "shift ends in" in title(teams.sent_cards[-1])
+        teams.sent_cards.clear()
+        tickets.check_shift_ends(db)
+        assert len(teams.sent_cards) == 0, "heads-up must fire only once per shift end"
+        db.delete(db.get(_Ticket, tid)); db.commit(); db.close()
+
+        # --- conditional reassignment: both GAs' shifts have already ended (simulated by
+        # seeding KV directly, since shift_end_for can't find an ended shift after the
+        # fact - this is exactly the bug the implementation works around); GA Two's next
+        # shift is far away, GA Three's is coming up soon ---
+        write_ics([
+            ("Desk: Two", now + timedelta(hours=3), now + timedelta(hours=5)),
+            ("GA Three - Front Desk", now + timedelta(minutes=10), now + timedelta(hours=2)),
+        ])
+        db = SessionLocal()
+        from app.db import kv_set as db_kv_set
+        ended_at = (db_utcnow() - timedelta(minutes=1)).isoformat()
+        db_kv_set(db, "shiftend:GA Two", ended_at)
+        db_kv_set(db, "shiftend:GA Three", ended_at)
+        db.commit()
+
+        sid2 = c.post("/api/session").json()["session_id"]
+        tidA = c.post(f"/api/session/{sid2}/handoff", json={"name": "B", "question": "due now"}).json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tidA}/claim", headers=GA, json={"ga_name": "GA Two"})
+        rowA = db.get(_Ticket, tidA)
+        rowA.next_deadline = db_utcnow()  # due now - before GA Two's next shift (3h away)
+        db.commit()
+
+        sid3 = c.post("/api/session").json()["session_id"]
+        tidB = c.post(f"/api/session/{sid3}/handoff", json={"name": "C", "question": "due later"}).json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tidB}/claim", headers=GA, json={"ga_name": "GA Three"})
+        rowB = db.get(_Ticket, tidB)
+        rowB.next_deadline = db_utcnow() + timedelta(hours=1)  # after GA Three's next shift (10 min away)
+        db.commit()
+
+        tickets.check_shift_ends(db)
+        db.refresh(rowA); db.refresh(rowB)
+        assert rowA.owner != "GA Two", "deadline before the owner's next shift must be reassigned"
+        assert rowB.owner == "GA Three", "deadline after the owner's next shift must NOT be reassigned"
+
+        db.delete(rowA); db.delete(rowB)
+        db.commit(); db.close()
+        write_ics([
+            ("Jeel Patel - Front Desk", now - timedelta(hours=1), now + timedelta(hours=2)),
+            ("Desk: Two", now - timedelta(hours=1), now + timedelta(hours=2)),
+            ("GA Three - Front Desk", now + timedelta(hours=3), now + timedelta(hours=5)),
+        ])
+    print("shift-end heads-up / conditional reassignment test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -984,6 +1047,7 @@ if __name__ == "__main__":
     test_on_my_way_deadline_and_confirmation()
     test_structured_snooze_and_third_snooze_auto_escalates()
     test_reminder_ladder_catchup_offshift_and_autoclaim()
+    test_shift_end_headsup_and_conditional_reassignment()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

@@ -3,6 +3,11 @@
 .env.*
 team.json
 
+# Directory source data (loaded through the admin page, not committed)
+data/*.csv
+tools/.cache/
+tools/known_profile_urls.csv
+
 # Database files
 *.db
 *.sqlite3

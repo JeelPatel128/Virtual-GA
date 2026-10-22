@@ -7,17 +7,17 @@ import re
 import tempfile
 import threading
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from . import directory, knowledge, llm, schedule, teams, tickets
+from . import directory, knowledge, llm, schedule, storage, teams, tickets
 from .config import BASE_DIR, load_team, settings
-from .db import ChatSession, Doc, Message, Person, QueryLog, SessionLocal, Ticket, init_db, utcnow
+from .db import ChatSession, Doc, Message, Person, QueryLog, SessionLocal, TaskFile, Ticket, init_db, utcnow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("virtual_ga")
@@ -275,6 +275,56 @@ def handoff(sid: str, body: HandoffIn, db=Depends(get_db)):
     return {"ticket_id": t.id}
 
 
+ALLOWED_TASK_FILE_MIMES = ("application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+
+@app.post("/api/session/{sid}/task")
+async def create_task(sid: str, name: str = Form(...), email: str = Form(""), type: str = Form(...),
+                      details: str = Form(...), copies: int = Form(1, ge=1, le=99),
+                      due_at: str = Form(...), pickup_location: str = Form(""),
+                      file: UploadFile | None = File(None), db=Depends(get_db)):
+    sess = _session(db, sid)
+    if tickets.open_ticket_for(db, sid):
+        raise HTTPException(409, "A GA has already been notified")
+    try:
+        due_dt = datetime.fromisoformat(due_at)
+    except ValueError:
+        raise HTTPException(400, "That due date/time isn't valid.")
+    if due_dt.tzinfo:
+        due_dt = due_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    # Validate the file BEFORE creating the ticket: a rejected file must never leave a
+    # dangling ticket + already-sent Teams card behind while the visitor sees an error.
+    data = mime = None
+    if file and file.filename:
+        data = await file.read()
+        limit = settings.TASK_FILE_MAX_MB * 1024 * 1024
+        if len(data) > limit:
+            raise HTTPException(413, f"File is over {settings.TASK_FILE_MAX_MB} MB")
+        mime = file.content_type or "application/octet-stream"
+        if not (mime.startswith("image/") or mime in ALLOWED_TASK_FILE_MIMES):
+            raise HTTPException(400, "Only PDF, DOCX, or image files are allowed.")
+
+    try:
+        t = tickets.create_task_ticket(db, sess, name, email, type, details, copies, due_dt, pickup_location)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    if data is not None:
+        path = storage.upload(data, mime)
+        if path:
+            t.file_backend, t.file_ref = "supabase", path
+        else:
+            tf = TaskFile(ticket_id=t.id, file_bytes=data)
+            db.add(tf)
+            db.flush()
+            t.file_backend, t.file_ref = "local", str(tf.id)
+        t.file_name, t.file_mime = file.filename[:300], mime
+        db.commit()
+
+    return {"ticket_id": t.id}
+
+
 @app.post("/api/session/{sid}/contact")
 def add_contact(sid: str, body: ContactIn, db=Depends(get_db)):
     sess = _session(db, sid)
@@ -327,7 +377,10 @@ def _ticket_json(db, t: Ticket, full: bool) -> dict:
            "has_phone": bool(s.visitor_phone), "on_shift": t.on_shift, "responded_by": t.responded_by,
            "created_at": tickets.local(t.created_at).strftime("%a %I:%M %p"),
            "waiting_minutes": int((utcnow() - t.created_at).total_seconds() // 60),
-           "escalated": bool(t.escalated_at), "owner": t.owner, "activity": t.activity}
+           "escalated": bool(t.escalated_at), "owner": t.owner, "activity": t.activity,
+           "kind": t.kind, "task": t.task,
+           "due_at": tickets.local(t.due_at).strftime("%a %I:%M %p") if t.due_at else None,
+           "file_name": t.file_name}  # metadata only - bytes are never included here
     if full:
         out["visitor_phone"] = s.visitor_phone
         msgs = db.scalars(select(Message).where(Message.session_id == t.session_id).order_by(Message.id)).all()
@@ -366,6 +419,25 @@ def ga_ticket(ticket_id: int, db=Depends(get_db)):
     if not t:
         raise HTTPException(404)
     return _ticket_json(db, t, True)
+
+
+@app.get("/api/ga/ticket/{ticket_id}/file", dependencies=[Depends(ticket_access)])
+def ga_ticket_file(ticket_id: int, db=Depends(get_db)):
+    """The task's attached file - GA console only, never exposed to Teams. Bytes (for
+    the local fallback) are only ever loaded here, not in any ticket-list/detail query."""
+    t = db.get(Ticket, ticket_id)
+    if not t or not t.file_ref:
+        raise HTTPException(404)
+    if t.file_backend == "supabase":
+        url = storage.signed_url(t.file_ref)
+        if not url:
+            raise HTTPException(502, "Could not generate a file link right now.")
+        return RedirectResponse(url)
+    tf = db.get(TaskFile, int(t.file_ref))
+    if not tf:
+        raise HTTPException(404)
+    return Response(tf.file_bytes, media_type=t.file_mime or "application/octet-stream",
+                    headers={"Content-Disposition": f'inline; filename="{t.file_name or "file"}"'})
 
 
 @app.post("/api/ga/ticket/{ticket_id}/claim", dependencies=[Depends(ticket_access)])

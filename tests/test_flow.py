@@ -419,6 +419,83 @@ def test_storage_module_degrades_and_builds_correct_requests():
     print("storage module test passed")
 
 
+def test_task_request_creation_and_file_privacy():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        due = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+
+        sid = c.post("/api/session").json()["session_id"]
+        teams.sent_cards.clear()
+        r = c.post(f"/api/session/{sid}/task", data={
+            "name": "Prof. Lee", "email": "lee@stevens.edu", "type": "Print/copies",
+            "details": "Need 20 copies of the syllabus", "copies": "20", "due_at": due,
+            "pickup_location": "Room 303"})
+        assert r.status_code == 200, r.text
+        tid = r.json()["ticket_id"]
+        card = teams.sent_cards[-1]
+        assert title(card) == "Task request: Print/copies"
+        assert "20" in json.dumps(card) and "Room 303" in json.dumps(card)
+
+        t = c.get(f"/api/ga/ticket/{tid}", headers=GA).json()
+        assert t["kind"] == "task" and t["task"]["type"] == "Print/copies" and t["task"]["copies"] == 20
+        assert t["due_at"] is not None and t["file_name"] is None
+
+        # an invalid task type is rejected
+        sid_invalid = c.post("/api/session").json()["session_id"]
+        r2 = c.post(f"/api/session/{sid_invalid}/task", data={
+            "name": "A", "type": "Not a real type", "details": "x", "due_at": due})
+        assert r2.status_code == 400, r2.text
+
+        from app.db import Ticket as _Ticket
+        db = SessionLocal()
+        db.delete(db.get(_Ticket, tid)); db.commit(); db.close()
+
+        # --- with a file: Supabase isn't configured in this test env, so it must use
+        # the local TaskFile fallback - and the file bytes must never appear in any
+        # ticket-list/ticket-detail response, only via the dedicated file endpoint ---
+        sid2 = c.post("/api/session").json()["session_id"]
+        r = c.post(f"/api/session/{sid2}/task", data={
+            "name": "Sam", "type": "Other", "details": "see attached", "due_at": due},
+            files={"file": ("notes.pdf", b"%PDF-1.4 fake pdf content", "application/pdf")})
+        assert r.status_code == 200, r.text
+        tid2 = r.json()["ticket_id"]
+
+        t2 = c.get(f"/api/ga/ticket/{tid2}", headers=GA).json()
+        assert t2["file_name"] == "notes.pdf"
+        assert "file_bytes" not in json.dumps(t2), "raw bytes must never appear in a ticket response"
+        listed = c.get("/api/ga/tickets", headers=GA).json()["tickets"]
+        assert "fake pdf content" not in json.dumps(listed)
+
+        fr = c.get(f"/api/ga/ticket/{tid2}/file", headers=GA)
+        assert fr.status_code == 200 and fr.content == b"%PDF-1.4 fake pdf content"
+        assert fr.headers["content-type"] == "application/pdf"
+
+        # an oversized or disallowed file type is rejected
+        big = b"0" * (11 * 1024 * 1024)
+        sid3 = c.post("/api/session").json()["session_id"]
+        r3 = c.post(f"/api/session/{sid3}/task", data={"name": "B", "type": "Other", "details": "x", "due_at": due},
+                   files={"file": ("big.pdf", big, "application/pdf")})
+        assert r3.status_code == 413
+
+        sid4 = c.post("/api/session").json()["session_id"]
+        r4 = c.post(f"/api/session/{sid4}/task", data={"name": "C", "type": "Other", "details": "x", "due_at": due},
+                   files={"file": ("virus.exe", b"MZ", "application/octet-stream")})
+        assert r4.status_code == 400
+
+        # neither rejected-file case must leave a dangling ticket + already-sent Teams
+        # card behind - the file is validated before the ticket is ever created
+        db = SessionLocal()
+        assert tickets.open_ticket_for(db, sid3) is None
+        assert tickets.open_ticket_for(db, sid4) is None
+        from sqlalchemy import select as _select
+        from app.db import TaskFile as _TaskFile
+        db.delete(db.get(_Ticket, tid2))
+        for tf in db.scalars(_select(_TaskFile)).all():
+            db.delete(tf)
+        db.commit(); db.close()
+    print("task request creation / file privacy test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -1134,6 +1211,7 @@ if __name__ == "__main__":
     test_shift_end_headsup_and_conditional_reassignment()
     test_shift_start_first_tick_sends_nothing_then_detects_new_shift()
     test_storage_module_degrades_and_builds_correct_requests()
+    test_task_request_creation_and_file_privacy()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

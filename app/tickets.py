@@ -130,6 +130,53 @@ def create_message_ticket(db, sess: ChatSession, question: str, person) -> Ticke
     return t
 
 
+TASK_TYPES = ("Print/copies", "Room setup", "Delivery/pickup", "Supplies/equipment", "Other")
+
+
+def create_task_ticket(db, sess: ChatSession, name: str, email: str | None, task_type: str, details: str,
+                       copies: int, due_at: datetime, pickup_location: str) -> Ticket:
+    """"Request something from the GAs" - a task, not a handoff or a message. due_at is
+    both stored for display and used directly as next_deadline, so it goes through the
+    exact same reminder ladder as everything else."""
+    if task_type not in TASK_TYPES:
+        raise ValueError(f"Unknown task type {task_type!r}")
+    on_shift = schedule.on_shift_now()
+    lead = lead_ga()
+    t = Ticket(session_id=sess.id, question=details.strip()[:2000], on_shift=[g.name for g in on_shift],
+              kind="task", due_at=due_at, next_deadline=due_at, requester_email=(email or "").strip() or None,
+              task={"type": task_type, "details": details.strip()[:2000], "copies": copies,
+                    "pickup_location": pickup_location.strip()[:200]})
+    db.add(t)
+    db.flush()
+    sess.visitor_name = name.strip()
+
+    first = name.split()[0] if name.strip() else "there"
+    say(db, sess.id, "system", f"Thanks {first}. Your request has been sent to the GA team.")
+    if not on_shift:
+        t.escalated_at = utcnow()
+
+    mention = list(on_shift)
+    if lead and lead not in mention and (settings.LEAD_ALERT_ON_EVERY_HANDOFF or not on_shift):
+        mention.append(lead)
+    teams.post(teams.build_card(
+        title=f"Task request: {task_type}",
+        mention=mention,
+        body_text=details.strip(),
+        lines=[
+            ("Requested by", name.strip() or "Not given"),
+            ("Copies", str(copies)),
+            ("Pickup location", pickup_location.strip() or "Not given"),
+            ("Due", local(due_at).strftime("%a %I:%M %p")),
+            ("On shift", ", ".join(t.on_shift) or "Nobody"),
+            ("Ticket", f"#{t.id}"),
+        ],
+        buttons=[("Open and respond", ticket_url(t.id))],
+        style="default" if on_shift else "urgent",
+    ))
+    db.commit()
+    return t
+
+
 # ---------- ownership (Reliability pack) ----------
 
 def claim_ticket(db, ticket_id: int, ga_name: str) -> bool:

@@ -110,9 +110,14 @@
 
     <section id="digest">
       <div class="stats" id="dStats"></div>
+      <div class="card" style="margin-top:14px"><h2>Open items by owner</h2><div id="dOwners"></div></div>
       <div class="card" style="margin-top:14px"><h2>Questions it couldn't answer today</h2>
         <p class="hint">Add these as Q&amp;As so it can answer next time.</p><div id="dGaps"></div></div>
       <button class="btn ghost" id="sendDigest">Send today's digest to Teams now</button><span class="msgline" id="dMsg"></span>
+      <div class="card" style="margin-top:14px"><h2>Weekly GA report</h2>
+        <p class="hint">Missed deadlines, snoozes, reassignments and avg time to done, trailing 7 days. Sent automatically every Monday.</p>
+        <div id="wStats"></div></div>
+      <button class="btn ghost" id="sendWeekly">Send this week's report to Teams now</button><span class="msgline" id="wMsg"></span>
     </section>
 
     <section id="setup">
@@ -233,13 +238,21 @@ async function loadSched() {
 
 async function loadDigest() {
   const d = await api("/api/admin/digest");
-  const tiles = [["Questions", d.questions], ["Bot answered", d.answered_by_bot], ["Handed to GA", d.handoffs], ["Escalated", d.escalated], ["Still open", d.still_open], ["Avg response", d.avg_response_min == null ? "n/a" : d.avg_response_min + " min"]];
+  const tiles = [["Questions", d.questions], ["Bot answered", d.answered_by_bot], ["Handed to GA", d.handoffs], ["Escalated", d.escalated], ["Still open", d.still_open], ["Overdue now", d.overdue], ["Done today", d.done_today], ["Avg response", d.avg_response_min == null ? "n/a" : d.avg_response_min + " min"]];
   $("dStats").innerHTML = tiles.map(([k, v]) => `<div class="card"><div class="hint">${k}</div><div class="stat">${esc(v)}</div></div>`).join("");
+  const owners = Object.entries(d.open_by_owner);
+  $("dOwners").innerHTML = owners.length ? `<ul>${owners.map(([k, v]) => `<li>${esc(k)}: ${v}</li>`).join("")}</ul>` : '<p class="hint">Nothing open right now.</p>';
   $("dGaps").innerHTML = d.unanswered.length ? `<ul>${d.unanswered.map((q, i) => `<li>${esc(q)} <button class="btn small ghost" data-gap="${i}" style="margin:4px 0">Answer this</button></li>`).join("")}</ul>` : '<p class="hint">None today.</p>';
   $("dGaps").querySelectorAll("[data-gap]").forEach(b => b.onclick = () => {
     document.querySelector('nav button[data-tab="kb"]').click(); $("qaQ").value = d.unanswered[+b.dataset.gap]; $("qaA").focus(); });
+
+  const w = await api("/api/admin/weekly-report");
+  $("wStats").innerHTML = w.names.length ? `<table><tr><th>GA</th><th>Missed deadlines</th><th>Snoozes</th><th>Reassigned away</th><th>Avg time to done</th></tr>${
+    w.names.map(n => `<tr><td>${esc(n)}</td><td>${w.missed_deadlines[n]}</td><td>${w.snoozes[n]}</td><td>${w.reassigned_away[n]}</td>
+    <td>${w.avg_time_to_done_min[n] == null ? "n/a" : w.avg_time_to_done_min[n] + " min"}</td></tr>`).join("")}</table>` : '<p class="hint">No GAs configured.</p>';
 }
 $("sendDigest").onclick = async () => { try { await api("/api/admin/digest/send", { method: "POST" }); flash("dMsg", " Sent"); } catch (er) { flash("dMsg", " " + er.message, true); } };
+$("sendWeekly").onclick = async () => { try { await api("/api/admin/weekly-report/send", { method: "POST" }); flash("wMsg", " Sent"); } catch (er) { flash("wMsg", " " + er.message, true); } };
 
 async function loadSetup() {
   const s = await api("/api/admin/status");

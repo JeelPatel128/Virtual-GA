@@ -12,7 +12,7 @@ from sqlalchemy import func, select, update
 
 from . import schedule, storage, teams
 from .config import lead_ga, load_team, settings
-from .db import ChatSession, Message, QueryLog, TaskFile, Ticket, kv_get, kv_set, utcnow
+from .db import ChatSession, Message, QueryLog, ReminderLog, TaskFile, Ticket, kv_get, kv_set, utcnow
 
 log = logging.getLogger("virtual_ga.tickets")
 TZ = ZoneInfo(settings.TIMEZONE)
@@ -457,14 +457,17 @@ def check_reminders(db) -> int:
         missed = list(range(t.last_reminder_step + 1, step))
         missed_note = f" (missed step{'s' if len(missed) > 1 else ''} {', '.join(map(str, missed))})" if missed else ""
         lead_name = "Unclaimed" if not t.owner else t.owner
+        targets = _reminder_targets(t)
         teams.post(teams.build_card(
             title=f"{REMINDER_LABELS[step]}{missed_note}",
-            mention=_reminder_targets(t),
+            mention=targets,
             body_text=f"“{t.question}”",
             lines=[("Owner", lead_name), ("Ticket", f"#{t.id}")],
             buttons=[("Open and respond", ticket_url(t.id))],
             style="default" if step == 1 else "urgent",
         ))
+        for g in targets:
+            db.add(ReminderLog(ticket_id=t.id, ga_name=g.name, step=step))
         if t.escalated_at is None:
             t.escalated_at = now
         t.last_reminder_step = step
@@ -491,6 +494,16 @@ def digest_data(db, day_local: datetime) -> dict:
     tk = db.scalars(select(Ticket).where(Ticket.created_at >= start, Ticket.created_at < end)).all()
     resp_mins = [(t.first_response_at - t.created_at).total_seconds() / 60 for t in tk if t.first_response_at]
     unanswered = [x.question for x in q if not x.confident]
+
+    # cross-cutting, not scoped to today: whatever is open right now, system-wide
+    open_now = db.scalars(select(Ticket).where(Ticket.status.in_(OPEN_STATUSES))).all()
+    open_by_owner: dict[str, int] = {}
+    for t in open_now:
+        key = t.owner or "Unclaimed"
+        open_by_owner[key] = open_by_owner.get(key, 0) + 1
+    overdue = sum(1 for t in open_now if t.next_deadline and t.next_deadline <= utcnow())
+    done_today = db.scalar(select(func.count()).select_from(Ticket)
+                           .where(Ticket.resolved_at >= start, Ticket.resolved_at < end))
     return {
         "date": start_local.strftime("%A, %b %d"),
         "questions": len(q),
@@ -501,6 +514,9 @@ def digest_data(db, day_local: datetime) -> dict:
         "avg_response_min": round(sum(resp_mins) / len(resp_mins), 1) if resp_mins else None,
         "unanswered": unanswered,
         "answered_samples": [x.question for x in q if x.confident][:10],
+        "open_by_owner": open_by_owner,
+        "overdue": overdue,
+        "done_today": done_today,
     }
 
 
@@ -509,6 +525,7 @@ def send_digest(db, day_local: datetime | None = None) -> dict:
     lead = lead_ga()
     gap_list = "\n".join(f"- {u}" for u in d["unanswered"][:15]) or "None. Nice."
     answered = "\n".join(f"- {a}" for a in d["answered_samples"]) or "None"
+    owner_list = "\n".join(f"- {k}: {v}" for k, v in d["open_by_owner"].items()) or "None"
     teams.post(teams.build_card(
         title=f"Virtual GA daily digest: {d['date']}",
         mention=[lead] if lead else [],
@@ -518,13 +535,90 @@ def send_digest(db, day_local: datetime | None = None) -> dict:
             ("Handed to a GA", str(d["handoffs"])),
             ("Escalated (5 min, no reply)", str(d["escalated"])),
             ("Still open", str(d["still_open"])),
+            ("Overdue right now", str(d["overdue"])),
+            ("Done today", str(d["done_today"])),
             ("Avg GA response", f"{d['avg_response_min']} min" if d["avg_response_min"] is not None else "n/a"),
         ],
-        body_text=f"**Questions the bot couldn't answer (add these to the knowledge base):**\n{gap_list}\n\n"
+        body_text=f"**Open items by owner:**\n{owner_list}\n\n"
+                  f"**Questions the bot couldn't answer (add these to the knowledge base):**\n{gap_list}\n\n"
                   f"**Sample of questions it handled:**\n{answered}",
         buttons=[("Open admin", f"{settings.PUBLIC_BASE_URL}/admin")],
     ))
     return d
+
+
+def weekly_report_data(db, now_local: datetime) -> dict:
+    """Per-GA metrics over the trailing 7 days. Reassignments-away and missed deadlines
+    come from durable logs that already exist (owner_history on each ticket, and
+    ReminderLog) rather than a point-in-time snapshot; snoozes/time-to-done are
+    attributed to each ticket's current/final owner, since there's no separate
+    per-snooze log."""
+    cutoff = utcnow() - timedelta(days=7)
+    names = [g.name for g in load_team()]
+    reassigned_away = {n: 0 for n in names}
+    for t in db.scalars(select(Ticket)).all():
+        hist = t.owner_history or []
+        for i in range(1, len(hist)):
+            prev_ga, at = hist[i - 1].get("ga"), hist[i].get("assigned_at")
+            if prev_ga in reassigned_away and at and datetime.fromisoformat(at) >= cutoff:
+                reassigned_away[prev_ga] += 1
+
+    snoozes = {n: 0 for n in names}
+    time_to_done: dict[str, list] = {n: [] for n in names}
+    for t in db.scalars(select(Ticket).where(Ticket.created_at >= cutoff)).all():
+        if t.owner in snoozes:
+            snoozes[t.owner] += t.snooze_count
+    for t in db.scalars(select(Ticket).where(Ticket.status == "done", Ticket.resolved_at >= cutoff)).all():
+        if t.owner in time_to_done:
+            time_to_done[t.owner].append((t.resolved_at - t.created_at).total_seconds() / 60)
+
+    missed_deadlines = {n: 0 for n in names}
+    for name, count in db.execute(select(ReminderLog.ga_name, func.count())
+                                  .where(ReminderLog.fired_at >= cutoff).group_by(ReminderLog.ga_name)).all():
+        if name in missed_deadlines:
+            missed_deadlines[name] = count
+
+    return {
+        "names": names,
+        "reassigned_away": reassigned_away,
+        "snoozes": snoozes,
+        "missed_deadlines": missed_deadlines,
+        "avg_time_to_done_min": {n: round(sum(v) / len(v), 1) if v else None for n, v in time_to_done.items()},
+    }
+
+
+def send_weekly_report(db, now_local: datetime | None = None) -> dict:
+    d = weekly_report_data(db, now_local or datetime.now(TZ))
+    lead = lead_ga()
+    rows = "\n".join(
+        f"- **{n}**: {d['missed_deadlines'][n]} missed deadline(s), {d['snoozes'][n]} snooze(s), "
+        f"{d['reassigned_away'][n]} reassigned away, "
+        f"avg time to done {d['avg_time_to_done_min'][n]} min" if d['avg_time_to_done_min'][n] is not None
+        else f"- **{n}**: {d['missed_deadlines'][n]} missed deadline(s), {d['snoozes'][n]} snooze(s), "
+             f"{d['reassigned_away'][n]} reassigned away, nothing closed this week"
+        for n in d["names"]
+    ) or "No GAs configured."
+    teams.post(teams.build_card(
+        title="Weekly GA report",
+        lines=[],
+        mention=[lead] if lead else [],
+        body_text=rows,
+        buttons=[("Open admin", f"{settings.PUBLIC_BASE_URL}/admin")],
+    ))
+    return d
+
+
+def maybe_send_weekly_report(db, now: datetime) -> bool:
+    """Monday only, once per ISO week - tracked in KV the same way the daily digest
+    tracks its once-a-day flag."""
+    if now.weekday() != 0:
+        return False
+    week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
+    if kv_get(db, "weekly_report_week") == week:
+        return False
+    send_weekly_report(db, now)
+    kv_set(db, "weekly_report_week", week)
+    return True
 
 
 def _next_owner_for_handoff() -> str | None:
@@ -657,7 +751,8 @@ def check_shift_starts(db) -> int:
 
 
 def tick(db) -> dict:
-    result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0, "task_files_purged": 0}
+    result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0, "task_files_purged": 0,
+              "weekly_report_sent": False}
     result["shift_ends_handled"] = check_shift_ends(db)
     result["shift_starts_handled"] = check_shift_starts(db)
     result["task_headsups_sent"] = check_task_heads_up(db)
@@ -669,6 +764,7 @@ def tick(db) -> dict:
         result["digest_sent"] = True
         result["phones_purged"] = purge_old_phone_numbers(db)  # once a day is plenty
         result["task_files_purged"] = purge_old_task_files(db)  # once a day is plenty
+        result["weekly_report_sent"] = maybe_send_weekly_report(db, now)
         db.commit()
     return result
 

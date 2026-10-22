@@ -607,6 +607,77 @@ def test_requester_confirmation_page():
     print("requester confirmation page test passed")
 
 
+def test_digest_additions_and_weekly_report():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        from sqlalchemy import select
+        from app.db import ReminderLog as _ReminderLog, Ticket as _Ticket, kv_set as db_kv_set, utcnow as db_utcnow
+
+        # --- digest additions: open by owner, overdue, done today ---
+        sid = c.post("/api/session").json()["session_id"]
+        tid = c.post(f"/api/session/{sid}/handoff", json={"name": "A", "question": "q"}).json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
+        db = SessionLocal()
+        db.get(_Ticket, tid).next_deadline = db_utcnow() - timedelta(minutes=1)
+        db.commit(); db.close()
+
+        sid2 = c.post("/api/session").json()["session_id"]
+        tid2 = c.post(f"/api/session/{sid2}/handoff", json={"name": "B", "question": "q2"}).json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid2}/claim", headers=GA, json={"ga_name": "GA Three"})
+        c.post(f"/api/ga/ticket/{tid2}/action", headers=GA, json={"ga_name": "GA Three", "action": "resolve"})
+
+        d = c.get("/api/admin/digest", headers=A).json()
+        assert d["open_by_owner"].get("GA Two", 0) >= 1
+        assert d["overdue"] >= 1
+        assert d["done_today"] >= 1
+
+        teams.sent_cards.clear()
+        assert c.post("/api/admin/digest/send", headers=A).status_code == 200
+        assert "GA Two" in json.dumps(teams.sent_cards[-1])
+
+        # --- weekly report: reassignment (owner_history), snoozes, missed deadlines ---
+        db = SessionLocal()
+        row = db.get(_Ticket, tid)
+        tickets.reassign_ticket(db, row, "GA Three", "manual test reassign")  # was GA Two, now GA Three
+        row.snooze_count = 2
+        db.commit()
+        assert tickets.check_reminders(db) == 1  # still overdue; logs a ReminderLog row for GA Three
+        db.close()
+
+        w = tickets.weekly_report_data(SessionLocal(), datetime.now(timezone.utc))
+        assert w["reassigned_away"]["GA Two"] >= 1
+        assert w["snoozes"]["GA Three"] >= 2
+        assert w["missed_deadlines"]["GA Three"] >= 1
+        assert w["avg_time_to_done_min"]["GA Three"] is not None
+
+        teams.sent_cards.clear()
+        assert c.post("/api/admin/weekly-report/send", headers=A).status_code == 200
+        assert title(teams.sent_cards[-1]) == "Weekly GA report"
+
+        # --- Monday-only gating, once per ISO week - a fixed date so this doesn't
+        # depend on what day the test actually runs ---
+        db = SessionLocal()
+        monday = datetime(2026, 10, 19, 12, 0, tzinfo=tickets.TZ)
+        tuesday = datetime(2026, 10, 20, 12, 0, tzinfo=tickets.TZ)
+        assert tickets.maybe_send_weekly_report(db, tuesday) is False
+        assert tickets.maybe_send_weekly_report(db, monday) is True
+        assert tickets.maybe_send_weekly_report(db, monday) is False  # same week, not resent
+        db_kv_set(db, "weekly_report_week", "")  # don't leak into later tests' /tasks/tick calls
+        db.commit(); db.close()
+
+        # cleanup: delete everything created here, since digest_data() aggregates by
+        # date regardless of status and would otherwise inflate test_full_flow()'s counts
+        db = SessionLocal()
+        for t in (tid, tid2):
+            row = db.get(_Ticket, t)
+            if row:
+                db.delete(row)
+        for rl in db.scalars(select(_ReminderLog)).all():
+            db.delete(rl)
+        db.commit(); db.close()
+    print("digest additions + weekly report test passed")
+
+
 def test_task_heads_up_fires_once_30_min_before_due():
     with TestClient(app) as c:
         GA = {"X-GA-Key": "gakey"}
@@ -1271,11 +1342,13 @@ def test_full_flow():
         assert c.get("/api/ga/team").status_code == 401
         assert c.get(f"/api/ga/team?tid={tid}&t={token}").json()["on_shift"] == ["Jeel Patel", "GA Two"]
 
-        # tick before 5 minutes: no escalation; digest goes out once
+        # tick before 5 minutes: no escalation; digest goes out once. Find the digest
+        # card by title rather than assuming it's the last one sent - if this happens to
+        # run on a real Monday, a weekly report card is appended right after it.
         teams.sent_cards.clear()
         r = c.get("/tasks/tick?key=cronkey").json()
         assert r["escalated"] == 0 and r["digest_sent"] is True
-        assert title(teams.sent_cards[-1]).startswith("Virtual GA daily digest")
+        assert any(title(cd).startswith("Virtual GA daily digest") for cd in teams.sent_cards)
         assert c.get("/tasks/tick?key=cronkey").json()["digest_sent"] is False
         assert c.get("/tasks/tick?key=bad").status_code == 401
 
@@ -1354,6 +1427,7 @@ if __name__ == "__main__":
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()
     test_requester_confirmation_page()
+    test_digest_additions_and_weekly_report()
     test_task_heads_up_fires_once_30_min_before_due()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()

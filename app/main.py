@@ -724,6 +724,17 @@ def admin_digest_send(db=Depends(get_db)):
     return tickets.send_digest(db)
 
 
+@app.get("/api/admin/weekly-report", dependencies=[Depends(require_admin)])
+def admin_weekly_report(db=Depends(get_db)):
+    from datetime import datetime
+    return tickets.weekly_report_data(db, datetime.now(tickets.TZ))
+
+
+@app.post("/api/admin/weekly-report/send", dependencies=[Depends(require_admin)])
+def admin_weekly_report_send(db=Depends(get_db)):
+    return tickets.send_weekly_report(db)
+
+
 @app.post("/api/admin/test-teams", dependencies=[Depends(require_admin)])
 def test_teams():
     from .config import lead_ga

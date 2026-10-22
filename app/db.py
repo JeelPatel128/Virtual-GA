@@ -129,6 +129,18 @@ class TaskFile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class ReminderLog(Base):
+    """One row per reminder card fired by the ladder (app/tickets.py::check_reminders),
+    naming the GA it was actually sent to. Lets the weekly lead report count missed
+    deadlines per GA without needing a point-in-time snapshot of the ladder state."""
+    __tablename__ = "reminder_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id", ondelete="CASCADE"), index=True)
+    ga_name: Mapped[str] = mapped_column(String(120), index=True)
+    step: Mapped[int] = mapped_column(Integer)
+    fired_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class QueryLog(Base):
     """Every question asked to the bot, for the daily digest and the 'questions to add' list."""
     __tablename__ = "query_log"

@@ -496,6 +496,35 @@ def test_task_request_creation_and_file_privacy():
     print("task request creation / file privacy test passed")
 
 
+def test_task_heads_up_fires_once_30_min_before_due():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        due = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
+        sid = c.post("/api/session").json()["session_id"]
+        r = c.post(f"/api/session/{sid}/task", data={
+            "name": "A", "type": "Other", "details": "x", "due_at": due})
+        tid = r.json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
+
+        db = SessionLocal()
+        teams.sent_cards.clear()
+        assert tickets.check_task_heads_up(db) == 1
+        card = teams.sent_cards[-1]
+        # a little real time elapses between computing `due` and checking, so the
+        # truncated minute count can read 19 as easily as 20 - check the range, not the
+        # exact value
+        assert title(card) in ("Task due in 19 min", "Task due in 20 min"), title(card)
+        assert mentions(card) == ["two@stevens.edu"]
+
+        teams.sent_cards.clear()
+        tickets.check_task_heads_up(db)
+        assert len(teams.sent_cards) == 0, "must fire only once per task"
+
+        from app.db import Ticket as _Ticket
+        db.delete(db.get(_Ticket, tid)); db.commit(); db.close()
+    print("task heads-up test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -1212,6 +1241,7 @@ if __name__ == "__main__":
     test_shift_start_first_tick_sends_nothing_then_detects_new_shift()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
+    test_task_heads_up_fires_once_30_min_before_due()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

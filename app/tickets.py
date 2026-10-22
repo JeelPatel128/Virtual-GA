@@ -512,6 +512,34 @@ def check_shift_ends(db) -> int:
     return acted
 
 
+def check_task_heads_up(db) -> int:
+    """30 minutes before a task's due time, a courtesy nudge goes to its owner (or
+    whoever's on shift if unclaimed) - separate from the reminder ladder's escalation
+    chain, which still runs independently off the same next_deadline/due_at."""
+    now = utcnow()
+    tasks = db.scalars(select(Ticket).where(Ticket.kind == "task", Ticket.status.in_(OPEN_STATUSES),
+                                            Ticket.due_at.is_not(None))).all()
+    sent = 0
+    for t in tasks:
+        minutes_to_due = (t.due_at - now).total_seconds() / 60
+        if not (0 <= minutes_to_due <= 30):
+            continue
+        key = f"task_headsup:{t.id}"
+        if kv_get(db, key):
+            continue
+        teams.post(teams.build_card(
+            title=f"Task due in {int(minutes_to_due)} min",
+            mention=_reminder_targets(t),
+            body_text=t.question,
+            lines=[("Ticket", f"#{t.id}")],
+            buttons=[("Open and respond", ticket_url(t.id))],
+        ))
+        kv_set(db, key, "1")
+        sent += 1
+    db.commit()
+    return sent
+
+
 def check_shift_starts(db) -> int:
     """A GA newly appearing in on_shift_now() since the last tick (diffed against a KV
     snapshot) gets a start-of-shift card: what's currently open, owned by whom, and its
@@ -547,6 +575,7 @@ def tick(db) -> dict:
     result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0}
     result["shift_ends_handled"] = check_shift_ends(db)
     result["shift_starts_handled"] = check_shift_starts(db)
+    result["task_headsups_sent"] = check_task_heads_up(db)
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
     if now.hour >= settings.DIGEST_HOUR and kv_get(db, "digest_date") != today:

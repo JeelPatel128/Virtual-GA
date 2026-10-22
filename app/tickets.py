@@ -2,7 +2,10 @@
 import hashlib
 import hmac
 import json
+import logging
+import smtplib
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
@@ -11,6 +14,7 @@ from . import schedule, storage, teams
 from .config import lead_ga, load_team, settings
 from .db import ChatSession, Message, QueryLog, TaskFile, Ticket, kv_get, kv_set, utcnow
 
+log = logging.getLogger("virtual_ga.tickets")
 TZ = ZoneInfo(settings.TIMEZONE)
 # Unified across all three kinds (visitor/message/task). `activity` carries the old
 # visitor-facing nuance (on_the_way/busy/replied) that used to live in `status` itself.
@@ -304,6 +308,8 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
         raise ValueError(f"Unknown action {action}")
     if t.status in ("done", "cancelled"):
         _clear_task_file(db, t)
+    if t.status == "done" and t.requester_email and t.confirmed is None:
+        send_requester_confirmation_email(t)
     db.commit()
 
 
@@ -356,6 +362,56 @@ def confirm_reached(db, t: Ticket, reached: bool) -> None:
             style="urgent",
         ))
         say(db, t.session_id, "system", "Sorry about that. I've flagged this to the lead GA right away.")
+    db.commit()
+
+
+def status_url(ticket_id: int) -> str:
+    return f"{settings.PUBLIC_BASE_URL}/status/{ticket_id}?t={ticket_token(ticket_id)}"
+
+
+def send_requester_confirmation_email(t: Ticket) -> None:
+    """Emails the requester a link to say whether their task was taken care of. Skips
+    quietly if SMTP isn't configured or there's no requester email - same
+    degrade-gracefully pattern as app/llm.py without a Gemini key."""
+    if not (settings.SMTP_HOST and t.requester_email):
+        return
+    msg = MIMEText(
+        "Hi,\n\nYour request to the Stevens School of Business front desk has been marked done.\n\n"
+        f"Was it taken care of? Let us know here: {status_url(t.id)}\n\n"
+        "Thanks,\nStevens SSB Front Desk")
+    msg["Subject"] = "Your SSB front desk request is marked done"
+    msg["From"] = settings.SMTP_FROM or settings.SMTP_USER
+    msg["To"] = t.requester_email
+    try:
+        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=15) as s:
+            s.starttls()
+            if settings.SMTP_USER:
+                s.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            s.send_message(msg)
+    except Exception as e:
+        log.warning("Requester confirmation email failed: %s", e)
+
+
+def confirm_requester(db, t: Ticket, confirmed: bool) -> None:
+    """The requester's own "was this taken care of" answer on the signed /status page,
+    asked once a task is done. No reopens the ticket to the lead right away rather than
+    waiting for the (by now stopped) reminder ladder to notice anything is wrong."""
+    t.confirmed, t.confirmed_at = confirmed, utcnow()
+    if not confirmed:
+        t.status, t.activity = "in_progress", None
+        t.next_deadline = utcnow()
+        t.last_reminder_step = 0
+        lead = lead_ga()
+        if lead:
+            reassign_ticket(db, t, lead.name, "requester says this wasn't taken care of")
+        teams.post(teams.build_card(
+            title="Reopened: requester says this wasn't taken care of",
+            mention=[lead] if lead else [],
+            body_text=f"“{t.question}”",
+            lines=[("Ticket", f"#{t.id}")],
+            buttons=[("Open and respond", ticket_url(t.id))],
+            style="urgent",
+        ))
     db.commit()
 
 

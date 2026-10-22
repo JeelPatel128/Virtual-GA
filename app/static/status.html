@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Request status</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  body { display: flex; flex-direction: column; min-height: 100dvh; align-items: center; padding: 24px 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 20px;
+         max-width: 420px; width: 100%; text-align: center; }
+  .card h1 { font-size: 19px; margin: 0 0 4px; }
+  .pill { display: inline-block; margin: 10px 0; padding: 4px 14px; border-radius: 999px; font-size: 13px;
+         font-weight: 600; background: var(--sys); color: var(--sys-ink); }
+  .row { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  .actions .btn { flex: 1; }
+  .thanks { font-size: 15px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="card" id="card">Loading...</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const parts = location.pathname.split("/");
+const ticketId = parts[parts.length - 1];
+const token = new URLSearchParams(location.search).get("t") || "";
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || "Something went wrong");
+  return data;
+}
+
+function render(s) {
+  const card = $("card");
+  const statusLabel = { new: "Waiting for a GA", claimed: "A GA has this", in_progress: "In progress",
+                        done: "Done", cancelled: "Cancelled" }[s.status] || s.status;
+  let html = `<h1>Your request${s.task_type ? " - " + s.task_type : ""}</h1>
+    <span class="pill">${statusLabel}</span>
+    <div class="row">Requested ${s.created_at}</div>`;
+  if (s.due_at) html += `<div class="row">Needed by ${s.due_at}</div>`;
+  if (s.confirm_prompt) {
+    html += `<p class="thanks">Was this taken care of?</p>
+      <div class="actions"><button class="btn quiet" id="noBtn">No</button><button class="btn" id="yesBtn">Yes</button></div>
+      <div class="err" id="err"></div>`;
+  } else if (s.confirmed === true) {
+    html += `<p class="thanks">Thanks for letting us know!</p>`;
+  } else if (s.confirmed === false) {
+    html += `<p class="thanks">We've flagged this to the lead GA to take another look.</p>`;
+  }
+  card.innerHTML = html;
+  if (s.confirm_prompt) {
+    const answer = async (confirmed) => {
+      $("yesBtn").disabled = $("noBtn").disabled = true;
+      try { render(await api(`/api/status/${ticketId}/confirm?t=${encodeURIComponent(token)}`,
+                             { method: "POST", body: JSON.stringify({ confirmed }) })); }
+      catch (e) { $("err").textContent = e.message; $("yesBtn").disabled = $("noBtn").disabled = false; }
+    };
+    $("yesBtn").onclick = () => answer(true);
+    $("noBtn").onclick = () => answer(false);
+  }
+}
+
+api(`/api/status/${ticketId}?t=${encodeURIComponent(token)}`)
+  .then(render)
+  .catch(e => { $("card").innerHTML = `<p class="err">${e.message}</p>`; });
+</script>
+</body>
+</html>

@@ -93,6 +93,11 @@ def admin_page():
     return FileResponse(STATIC / "admin.html")
 
 
+@app.get("/status/{ticket_id}")
+def status_page(ticket_id: int):
+    return FileResponse(STATIC / "status.html")
+
+
 @app.get("/qr.png")
 def qr_png():
     import qrcode
@@ -132,6 +137,10 @@ class ResolvePersonIn(BaseModel):
 
 class ConfirmReachedIn(BaseModel):
     reached: bool
+
+
+class StatusConfirmIn(BaseModel):
+    confirmed: bool
 
 
 def _session(db, sid: str) -> ChatSession:
@@ -438,6 +447,37 @@ def ga_ticket_file(ticket_id: int, db=Depends(get_db)):
         raise HTTPException(404)
     return Response(tf.file_bytes, media_type=t.file_mime or "application/octet-stream",
                     headers={"Content-Disposition": f'inline; filename="{t.file_name or "file"}"'})
+
+
+def _status_json(t: Ticket) -> dict:
+    """Requester-facing view: status/timing only, never the visitor's phone number or
+    the full GA chat transcript."""
+    return {"id": t.id, "status": t.status, "kind": t.kind, "task_type": (t.task or {}).get("type"),
+            "created_at": tickets.local(t.created_at).strftime("%a %I:%M %p"),
+            "due_at": tickets.local(t.due_at).strftime("%a %I:%M %p") if t.due_at else None,
+            "confirm_prompt": t.status == "done" and t.confirmed is None,
+            "confirmed": t.confirmed}
+
+
+@app.get("/api/status/{ticket_id}", dependencies=[Depends(ticket_access)])
+def get_status(ticket_id: int, db=Depends(get_db)):
+    t = db.get(Ticket, ticket_id)
+    if not t:
+        raise HTTPException(404)
+    return _status_json(t)
+
+
+@app.post("/api/status/{ticket_id}/confirm", dependencies=[Depends(ticket_access)])
+def confirm_status(ticket_id: int, body: StatusConfirmIn, db=Depends(get_db)):
+    t = db.get(Ticket, ticket_id)
+    if not t:
+        raise HTTPException(404)
+    if t.status != "done":
+        raise HTTPException(409, "This request isn't marked done yet")
+    if t.confirmed is not None:
+        raise HTTPException(409, "This has already been answered")
+    tickets.confirm_requester(db, t, body.confirmed)
+    return _status_json(t)
 
 
 @app.post("/api/ga/ticket/{ticket_id}/claim", dependencies=[Depends(ticket_access)])

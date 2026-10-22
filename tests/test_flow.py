@@ -548,6 +548,65 @@ def test_file_cleared_on_done_and_fourteen_day_sweep():
     print("file privacy on done + 14-day sweep test passed")
 
 
+def test_requester_confirmation_page():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        due = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        from app.db import Ticket as _Ticket
+
+        # SMTP isn't configured in this test env: sending must degrade quietly, never raise
+        assert tickets.send_requester_confirmation_email(_Ticket(id=999, requester_email="x@y.com")) is None
+
+        sid = c.post("/api/session").json()["session_id"]
+        r = c.post(f"/api/session/{sid}/task", data={
+            "name": "Mia", "email": "mia@stevens.edu", "type": "Other",
+            "details": "Set up chairs in 203", "due_at": due})
+        tid = r.json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
+
+        token = tickets.ticket_token(tid)
+        assert c.get(f"/api/status/{tid}?t=wrong").status_code == 401
+        s = c.get(f"/api/status/{tid}?t={token}").json()
+        assert s["status"] == "claimed" and s["confirm_prompt"] is False
+
+        teams.sent_cards.clear()
+        assert c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+                      json={"ga_name": "GA Two", "action": "resolve"}).status_code == 200
+
+        s = c.get(f"/api/status/{tid}?t={token}").json()
+        assert s["status"] == "done" and s["confirm_prompt"] is True and s["confirmed"] is None
+
+        # "No" reopens the ticket to the lead and alerts them right away
+        r2 = c.post(f"/api/status/{tid}/confirm?t={token}", json={"confirmed": False})
+        assert r2.status_code == 200
+        body = r2.json()
+        assert body["status"] == "in_progress" and body["confirmed"] is False
+        card = teams.sent_cards[-1]
+        assert title(card) == "Reopened: requester says this wasn't taken care of"
+        assert "jp@stevens.edu" in mentions(card)
+
+        db = SessionLocal()
+        t = db.get(_Ticket, tid)
+        assert t.owner == "Jeel Patel"
+        db.delete(t); db.commit(); db.close()
+
+        # "Yes" just records the answer; answering twice is refused
+        sid2 = c.post("/api/session").json()["session_id"]
+        r3 = c.post(f"/api/session/{sid2}/task", data={
+            "name": "Noah", "type": "Other", "details": "x", "due_at": due})
+        tid2 = r3.json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid2}/claim", headers=GA, json={"ga_name": "GA Two"})
+        c.post(f"/api/ga/ticket/{tid2}/action", headers=GA, json={"ga_name": "GA Two", "action": "resolve"})
+        token2 = tickets.ticket_token(tid2)
+        r4 = c.post(f"/api/status/{tid2}/confirm?t={token2}", json={"confirmed": True})
+        assert r4.status_code == 200 and r4.json()["status"] == "done" and r4.json()["confirmed"] is True
+        assert c.post(f"/api/status/{tid2}/confirm?t={token2}", json={"confirmed": True}).status_code == 409
+
+        db = SessionLocal()
+        db.delete(db.get(_Ticket, tid2)); db.commit(); db.close()
+    print("requester confirmation page test passed")
+
+
 def test_task_heads_up_fires_once_30_min_before_due():
     with TestClient(app) as c:
         GA = {"X-GA-Key": "gakey"}
@@ -1294,6 +1353,7 @@ if __name__ == "__main__":
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()
+    test_requester_confirmation_page()
     test_task_heads_up_fires_once_30_min_before_due()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()

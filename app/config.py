@@ -56,6 +56,14 @@ class Settings:
     SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
     TASK_FILE_MAX_MB = int(os.getenv("TASK_FILE_MAX_MB", "10"))
 
+    # Optional: emails the requester a link to confirm a task was taken care of.
+    # Skipped quietly (see app/tickets.py) if SMTP_HOST is unset.
+    SMTP_HOST = os.getenv("SMTP_HOST", "")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM = os.getenv("SMTP_FROM", "")
+
     # Behaviour
     ESCALATE_AFTER_MINUTES = int(os.getenv("ESCALATE_AFTER_MINUTES", "5"))
     REMINDER_STEP_MINUTES = int(os.getenv("REMINDER_STEP_MINUTES", "15"))

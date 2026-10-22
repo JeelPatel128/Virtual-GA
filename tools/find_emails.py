@@ -54,16 +54,24 @@ _robots_cache: dict[str, urllib.robotparser.RobotFileParser] = {}
 # ---------- polite fetching: robots.txt, rate limit, local cache ----------
 
 def _robots_allows(url: str) -> bool:
+    """RobotFileParser.read() makes its own anonymous urllib request with no custom
+    User-Agent - confirmed against the real site that this gets a 403 from its bot defense
+    (unrelated to actual robots.txt policy), which the stdlib then misreads as "disallow
+    everything". Fetching robots.txt ourselves with the same User-Agent as every other
+    request, and only handing the parser the resulting text, avoids that false negative."""
     origin = f"{url.split('://')[0]}://{url.split('://')[1].split('/')[0]}"
-    rp = _robots_cache.get(origin)
-    if rp is None:
-        rp = urllib.robotparser.RobotFileParser()
-        rp.set_url(urljoin(origin, "/robots.txt"))
+    if origin not in _robots_cache:
+        robots_url = urljoin(origin, "/robots.txt")
+        rp = None
         try:
-            rp.read()
+            resp = requests.get(robots_url, headers={"User-Agent": USER_AGENT}, timeout=15)
+            if resp.status_code == 200:
+                rp = urllib.robotparser.RobotFileParser()
+                rp.parse(resp.text.splitlines())
         except Exception:
-            rp = None  # couldn't read robots.txt; fail open rather than block forever
+            pass  # couldn't fetch robots.txt at all; fail open rather than block forever
         _robots_cache[origin] = rp
+    rp = _robots_cache[origin]
     return rp.can_fetch(USER_AGENT, url) if rp else True
 
 

@@ -345,6 +345,10 @@ class NoteIn(BaseModel):
     added_by: str | None = None
 
 
+class SettingsIn(BaseModel):
+    show_extensions: bool
+
+
 @app.post("/api/admin/login", dependencies=[Depends(require_admin)])
 def admin_login():
     return {"ok": True}
@@ -486,6 +490,17 @@ async def import_directory(file: UploadFile = File(...), db=Depends(get_db)):
 async def import_rooms(file: UploadFile = File(...), db=Depends(get_db)):
     text = (await file.read()).decode("utf-8", errors="replace")
     return directory.import_rooms_csv(db, text)
+
+
+@app.get("/api/admin/settings", dependencies=[Depends(require_admin)])
+def get_settings(db=Depends(get_db)):
+    return {"show_extensions": directory.get_show_extensions(db)}
+
+
+@app.post("/api/admin/settings", dependencies=[Depends(require_admin)])
+def update_settings(body: SettingsIn, db=Depends(get_db)):
+    directory.set_show_extensions(db, body.show_extensions)
+    return {"show_extensions": body.show_extensions}
 
 
 @app.get("/api/admin/schedule", dependencies=[Depends(require_admin)])

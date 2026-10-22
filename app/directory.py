@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 
 from sqlalchemy import func, select
 
-from .db import Person, Room
+from .db import Person, Room, kv_get, kv_set
 
 log = logging.getLogger("virtual_ga.directory")
 
@@ -30,6 +30,17 @@ whats""".split())
 
 TITLE_WORD_RE = re.compile(r"\b(professor|prof|dr|doctor|dean|mr|ms|mrs)\b", re.I)
 TITLE_WORDS = ["professor", "prof", "dr", "doctor", "dean", "mr", "ms", "mrs"]
+EXTENSION_RE = re.compile(r"\b(extension|ext\.?|phone\s*number|office\s*number)\b", re.I)
+EMAIL_RE = re.compile(r"\bemail\b", re.I)
+
+
+def get_show_extensions(db) -> bool:
+    return (kv_get(db, "show_extensions") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def set_show_extensions(db, value: bool) -> None:
+    kv_set(db, "show_extensions", "true" if value else "false")
+    db.commit()
 
 
 def _is_title_word(w: str) -> bool:
@@ -206,7 +217,7 @@ def _not_found_answer() -> dict:
             "meta": {"offer_handoff": True}}
 
 
-def _format_person_answer(p: "Person") -> dict:
+def _format_person_answer(p: "Person", text: str, show_extensions: bool) -> dict:
     meta: dict = {"offer_handoff": False}
     lead = f"{p.name}, {p.title}."
     if p.building == "Babbio Center" and p.directions:
@@ -222,6 +233,19 @@ def _format_person_answer(p: "Person") -> dict:
         answer = f"{lead} They work remotely; email is the best way to reach them."
     else:
         answer = lead
+
+    if EXTENSION_RE.search(text):
+        if show_extensions and p.extension:
+            answer += f" Extension: {p.extension}."
+        else:
+            answer += " I can't share extensions here, but a GA can look it up for you."
+            meta["offer_handoff"] = True
+    if EMAIL_RE.search(text):
+        if p.email:
+            answer += f" Email: {p.email}."
+        else:
+            answer += " I don't have an email on file for them; a GA can help."
+            meta["offer_handoff"] = True
     return {"answer": answer, "meta": meta}
 
 
@@ -246,4 +270,4 @@ def resolve(db, sess, text: str) -> dict | None:
         names = ", ".join(f"{p.name} ({p.title})" for p in unique.values())
         return {"answer": f"Did you mean {names}? Tell me which one.", "meta": {}}
 
-    return _format_person_answer(next(iter(unique.values())))
+    return _format_person_answer(next(iter(unique.values())), text, get_show_extensions(db))

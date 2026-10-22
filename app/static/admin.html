@@ -93,6 +93,9 @@
           <button class="btn" id="testTeams">Send a Teams test</button>
           <button class="btn quiet" id="reembed">Re-index knowledge with AI</button>
         </div><div class="msgline" id="setupMsg"></div></div>
+      <div class="card"><h2>Directory</h2>
+        <label class="check"><input type="checkbox" id="showExtensions"> Show extensions to visitors (always visible to GAs either way)</label>
+        <div class="msgline" id="extMsg"></div></div>
       <div class="card"><h2>QR code for the desk</h2>
         <p class="hint">Print this and put it on the front desk.</p>
         <img src="/qr.png" alt="QR code for the Virtual GA" style="width:200px;height:200px;background:#fff;padding:8px;border-radius:12px">
@@ -180,10 +183,13 @@ async function loadSetup() {
     ${row("Google Calendar", s.calendar_configured, "GCAL_ICS_URL, the calendar's secret iCal address.")}
     </table><p class="hint">Public link: ${esc(s.public_url)} · Open tickets: ${s.open_tickets}</p>
     <p><b>Team:</b> ${s.team.map(g => esc(g.name) + (g.lead ? " (lead)" : "")).join(", ") || '<span class="no">team.json is empty</span>'}</p>`;
+  const settings = await api("/api/admin/settings");
+  $("showExtensions").checked = settings.show_extensions;
 }
 $("testTeams").onclick = async () => { const r = await api("/api/admin/test-teams", { method: "POST" });
   flash("setupMsg", r.sent ? "Sent. Check the Teams channel." : (r.webhook_configured ? "Teams rejected it. Check the server log." : "Set TEAMS_WEBHOOK_URL first."), !r.sent); };
 $("reembed").onclick = async () => { try { const r = await api("/api/admin/reembed", { method: "POST" }); flash("setupMsg", `Re-indexed ${r.embedded} chunks.`); } catch (er) { flash("setupMsg", er.message, true); } };
+$("showExtensions").onchange = async (e) => { try { await api("/api/admin/settings", { method: "POST", body: JSON.stringify({ show_extensions: e.target.checked }) }); flash("extMsg", "Saved"); } catch (er) { flash("extMsg", er.message, true); } };
 
 const loaders = { kb: loadDocs, sched: loadSched, digest: loadDigest, setup: loadSetup };
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {

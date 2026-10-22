@@ -94,6 +94,14 @@
           <button class="btn" style="margin-top:10px">Import</button><div class="msgline" id="roomsMsg"></div>
         </form>
       </div>
+      <form class="card" id="emailsForm">
+        <h2>Import found emails</h2>
+        <p class="hint">data/email_candidates.csv from tools/find_emails.py. Nothing is applied to the
+        directory until you approve it below.</p>
+        <label for="emailsFile">CSV file</label><input id="emailsFile" type="file" required accept=".csv">
+        <button class="btn" style="margin-top:10px">Import</button><div class="msgline" id="emailsMsg"></div>
+      </form>
+      <div class="card"><h2>Review emails</h2><div id="emailCandidates">Loading...</div></div>
     </section>
 
     <section id="sched">
@@ -176,9 +184,31 @@ $("searchForm").onsubmit = async (e) => { e.preventDefault();
   $("sres").innerHTML = d.hits.length ? d.hits.map(h => `<div class="doc"><div><div class="t">${esc(h.title)} <span class="hint">score ${h.score} (${h.method})</span></div><div class="p">${esc(h.text)}</div></div></div>`).join("")
     : '<p class="hint">Nothing matched. The bot would offer to get a GA.</p>'; };
 
+async function loadEmailCandidates() {
+  const d = await api("/api/admin/emails/candidates");
+  $("emailCandidates").innerHTML = d.candidates.length ? d.candidates.map(c => `
+    <div class="doc"><div><div class="t"><span class="tag">${esc(c.confidence)}</span>${esc(c.name)}</div>
+    <div class="p">${esc(c.email)}${c.source_url ? " · " + esc(c.source_url) : ""}</div></div>
+    <div style="display:flex;gap:6px"><button class="btn small" data-approve="${c.id}">Approve</button>
+    <button class="btn small quiet" data-reject="${c.id}">Reject</button></div></div>`).join("")
+    : '<p class="hint">Nothing pending. Import data/email_candidates.csv above.</p>';
+  $("emailCandidates").querySelectorAll("[data-approve]").forEach(b => b.onclick = async () => {
+    try { await api(`/api/admin/emails/candidates/${b.dataset.approve}/approve`, { method: "POST" }); loadEmailCandidates(); }
+    catch (er) { alert(er.message); } });
+  $("emailCandidates").querySelectorAll("[data-reject]").forEach(b => b.onclick = async () => {
+    await api(`/api/admin/emails/candidates/${b.dataset.reject}/reject`, { method: "POST" }); loadEmailCandidates(); });
+}
+$("emailsForm").onsubmit = async (e) => { e.preventDefault();
+  const f = $("emailsFile").files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  try { const r = await api("/api/admin/emails/import", { method: "POST", body: fd });
+    flash("emailsMsg", `${r.added} candidates imported.`); loadEmailCandidates(); }
+  catch (er) { flash("emailsMsg", er.message, true); } };
+
 async function loadDirectory() {
   const s = await api("/api/admin/status");
   $("dirCounts").innerHTML = `<p><b>${s.people_count}</b> people, <b>${s.rooms_count}</b> rooms/places currently active.</p>`;
+  loadEmailCandidates();
 }
 $("peopleForm").onsubmit = async (e) => { e.preventDefault();
   const f = $("peopleFile").files[0]; if (!f) return;

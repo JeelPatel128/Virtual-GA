@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 
 from sqlalchemy import func, select
 
-from .db import Person, Room, kv_get, kv_set
+from .db import EmailCandidate, Person, Room, kv_get, kv_set
 
 log = logging.getLogger("virtual_ga.directory")
 
@@ -180,6 +180,45 @@ def import_rooms_csv(db, csv_text: str) -> dict:
     db.commit()
     log.info("rooms import: %d added, %d updated, %d inactivated", added, updated, inactivated)
     return {"added": added, "updated": updated, "inactivated": inactivated, "total_in_csv": len(seen)}
+
+
+# ---------- email candidates (from tools/find_emails.py, reviewed here before approval) ----------
+
+def import_email_candidates_csv(db, csv_text: str) -> dict:
+    rows = list(csv.DictReader(io.StringIO(csv_text)))
+    added = 0
+    for row in rows:
+        name = (row.get("name") or "").strip()
+        email = (row.get("email") or "").strip()
+        if not name or not email:
+            continue
+        db.add(EmailCandidate(name=name, email=email, confidence=(row.get("confidence") or "low").strip(),
+                              source_url=(row.get("source_url") or "").strip()))
+        added += 1
+    db.commit()
+    return {"added": added}
+
+
+def approve_email_candidate(db, candidate_id: int) -> dict:
+    cand = db.get(EmailCandidate, candidate_id)
+    if not cand:
+        raise ValueError("Candidate not found")
+    person = db.scalar(select(Person).where(func.lower(Person.name) == cand.name.strip().lower()))
+    if not person:
+        raise ValueError(f"No directory entry named {cand.name!r} - import the directory first")
+    person.email = cand.email
+    cand.status = "approved"
+    db.commit()
+    return {"ok": True, "person_id": person.id}
+
+
+def reject_email_candidate(db, candidate_id: int) -> dict:
+    cand = db.get(EmailCandidate, candidate_id)
+    if not cand:
+        raise ValueError("Candidate not found")
+    cand.status = "rejected"
+    db.commit()
+    return {"ok": True}
 
 
 # ---------- matching ----------

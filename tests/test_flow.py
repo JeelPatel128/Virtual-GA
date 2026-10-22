@@ -513,6 +513,45 @@ def test_admin_status_reports_directory_counts():
     print("admin status directory counts test passed")
 
 
+def test_email_candidate_review_flow():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+
+        csv_text = "name,email,confidence,source_url\nHaoying Xu,hxu@stevens.edu,high,https://example.edu/profile/hxu\n"
+        r = c.post("/api/admin/emails/import", headers=A, files={"file": ("cands.csv", csv_text, "text/csv")})
+        assert r.status_code == 200 and r.json()["added"] == 1, r.text
+
+        cands = c.get("/api/admin/emails/candidates", headers=A).json()["candidates"]
+        pending = next(x for x in cands if x["name"] == "Haoying Xu")
+
+        # reject must not touch the directory
+        r = c.post(f"/api/admin/emails/candidates/{pending['id']}/reject", headers=A)
+        assert r.status_code == 200
+
+        # re-import the same candidate and approve it this time
+        c.post("/api/admin/emails/import", headers=A, files={"file": ("cands2.csv", csv_text, "text/csv")})
+        cands = c.get("/api/admin/emails/candidates", headers=A).json()["candidates"]
+        pending = next(x for x in cands if x["name"] == "Haoying Xu")
+        r = c.post(f"/api/admin/emails/candidates/{pending['id']}/approve", headers=A)
+        assert r.status_code == 200, r.text
+
+        from sqlalchemy import select
+        from app.db import Person
+        db = SessionLocal()
+        xu = db.scalar(select(Person).where(Person.name == "Haoying Xu"))
+        assert xu.email == "hxu@stevens.edu", xu.email
+        db.close()
+
+        # approving a candidate with no matching directory entry is a 409, not a crash
+        csv2 = "name,email,confidence,source_url\nNobody Here,x@stevens.edu,low,\n"
+        c.post("/api/admin/emails/import", headers=A, files={"file": ("c3.csv", csv2, "text/csv")})
+        cands = c.get("/api/admin/emails/candidates", headers=A).json()["candidates"]
+        nobody = next(x for x in cands if x["name"] == "Nobody Here")
+        r = c.post(f"/api/admin/emails/candidates/{nobody['id']}/approve", headers=A)
+        assert r.status_code == 409
+    print("email candidate review flow test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -679,4 +718,5 @@ if __name__ == "__main__":
     test_message_ticket_deadline_and_escalation()
     test_ga_directory_search()
     test_admin_status_reports_directory_counts()
+    test_email_candidate_review_flow()
     test_full_flow()

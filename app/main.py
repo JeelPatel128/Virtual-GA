@@ -520,6 +520,37 @@ async def import_rooms(file: UploadFile = File(...), db=Depends(get_db)):
     return directory.import_rooms_csv(db, text)
 
 
+@app.post("/api/admin/emails/import", dependencies=[Depends(require_admin)])
+async def import_email_candidates(file: UploadFile = File(...), db=Depends(get_db)):
+    text = (await file.read()).decode("utf-8", errors="replace")
+    return directory.import_email_candidates_csv(db, text)
+
+
+@app.get("/api/admin/emails/candidates", dependencies=[Depends(require_admin)])
+def list_email_candidates(db=Depends(get_db)):
+    from .db import EmailCandidate
+    rows = db.scalars(select(EmailCandidate).where(EmailCandidate.status == "pending")
+                      .order_by(EmailCandidate.id)).all()
+    return {"candidates": [{"id": r.id, "name": r.name, "email": r.email, "confidence": r.confidence,
+                            "source_url": r.source_url} for r in rows]}
+
+
+@app.post("/api/admin/emails/candidates/{cand_id}/approve", dependencies=[Depends(require_admin)])
+def approve_email_candidate_ep(cand_id: int, db=Depends(get_db)):
+    try:
+        return directory.approve_email_candidate(db, cand_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.post("/api/admin/emails/candidates/{cand_id}/reject", dependencies=[Depends(require_admin)])
+def reject_email_candidate_ep(cand_id: int, db=Depends(get_db)):
+    try:
+        return directory.reject_email_candidate(db, cand_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.get("/api/admin/settings", dependencies=[Depends(require_admin)])
 def get_settings(db=Depends(get_db)):
     return {"show_extensions": directory.get_show_extensions(db)}

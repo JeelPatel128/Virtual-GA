@@ -727,6 +727,113 @@ def test_digest_additions_and_weekly_report():
     print("digest additions + weekly report test passed")
 
 
+FAQ_FIXTURE_CSV = (
+    b"id,category,type,question,variants,asked_by,times_mentioned,answer,source,handled_by,"
+    b"changes_each_semester,status\n"
+    b'P1,Printing,Answer,Where can I print,Wheres the printer | Print location,Alice,5,'
+    b'Printers are in the library basement.,Front desk notes,GA team,no,"Draft, verify"\n'
+    b"R1,Rooms,Directory,Where is room 203,,Bob,2,Room 203 is on the 2nd floor near the elevator.,"
+    b",GA team,no,Suggested wording\n"
+    b"K1,Keys,Answer,How do I get a key,,Carol,1,Ask the front desk for a temporary key.,"
+    b",GA team,yes,Needs answer\n"
+    b'T1,Tasks,Task,Can someone print my resume,,Dave,3,A GA can print small jobs for you.,'
+    b',GA team,no,"Draft, verify"\n'
+)
+
+
+def test_faq_bulk_import():
+    with TestClient(app) as c:
+        from sqlalchemy import select
+        from app import knowledge
+        from app.db import Doc as _Doc
+
+        # missing-column CSV is rejected with a clear list, nothing imported
+        bad_csv = b"id,question,answer\nP1,Q,A\n"
+        r = c.post("/api/admin/faq/preview", headers=A, files={"file": ("faq.csv", bad_csv, "text/csv")})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["rows"] == [] and "category" in body["missing_columns"]
+        r2 = c.post("/api/admin/faq/import", headers=A, files={"file": ("faq.csv", bad_csv, "text/csv")})
+        assert r2.status_code == 400 and "category" in r2.json()["detail"]
+
+        # preview shows what will happen without saving anything
+        r = c.post("/api/admin/faq/preview", headers=A, files={"file": ("faq.csv", FAQ_FIXTURE_CSV, "text/csv")})
+        body = r.json()
+        assert body["missing_columns"] == []
+        assert body["to_import"] == 3 and body["to_skip"] == 1
+        row_p1 = next(x for x in body["rows"] if x["id"] == "P1")
+        assert row_p1["will_import"] is True and row_p1["variants"] == ["Wheres the printer", "Print location"]
+        row_k1 = next(x for x in body["rows"] if x["id"] == "K1")
+        assert row_k1["will_import"] is False
+        db = SessionLocal()
+        assert db.scalars(select(_Doc).where(_Doc.external_id == "P1")).first() is None, \
+            "preview must not save anything"
+        db.close()
+
+        # import actually saves - 3 imported, 1 skipped ("Needs answer"), upserted by id
+        r = c.post("/api/admin/faq/import", headers=A, files={"file": ("faq.csv", FAQ_FIXTURE_CSV, "text/csv")})
+        assert r.json() == {"missing_columns": [], "imported": 3, "skipped": 1, "errors": []}
+
+        db = SessionLocal()
+        p1 = db.scalars(select(_Doc).where(_Doc.external_id == "P1")).first()
+        assert p1 is not None and p1.kind == "qa" and p1.category == "Printing" and p1.faq_type == "Answer"
+        assert p1.variants == ["Wheres the printer", "Print location"]
+        assert p1.changes_each_semester is False and p1.times_mentioned == 5 and p1.status == "Draft, verify"
+        assert db.scalars(select(_Doc).where(_Doc.external_id == "K1")).first() is None, \
+            "Needs answer rows must be skipped"
+        p1_id = p1.id
+        db.close()
+
+        # variants are searchable even though they never appear in the title/answer
+        hits = knowledge.search(SessionLocal(), "Wheres the printer", k=3)
+        assert any(h["doc_id"] == p1_id for h in hits), "variant phrasing should surface the printing doc"
+
+        # re-importing the same id updates in place rather than duplicating
+        updated_csv = FAQ_FIXTURE_CSV.replace(b"Printers are in the library basement.",
+                                              b"Printers are on the 2nd floor now.")
+        c.post("/api/admin/faq/import", headers=A, files={"file": ("faq.csv", updated_csv, "text/csv")})
+        db = SessionLocal()
+        rows = db.scalars(select(_Doc).where(_Doc.external_id == "P1")).all()
+        assert len(rows) == 1, "upsert by id must not duplicate on re-import"
+        assert "2nd floor now" in rows[0].extracted_text
+        db.close()
+
+        # Task-type redirect: a top hit with faq_type "Task" above the score threshold
+        # offers the task-request form instead of answering normally
+        sid = c.post("/api/session").json()["session_id"]
+        last = _ask_text(c, sid, "Can someone print my resume")
+        assert last["meta"].get("offer_task_form") is True
+        assert "Request something from the GAs" in last["text"]
+
+        # an unrelated question never gets redirected just because *some* Task doc exists
+        last2 = _ask_text(c, sid, "where is the nearest vending machine")
+        assert not last2["meta"].get("offer_task_form")
+
+        # Edit button: updating an existing Q&A in place, not creating a duplicate
+        qa_id = c.post("/api/admin/qa", headers=A,
+                       json={"question": "Where is lost and found", "answer": "At the front desk"}).json()["id"]
+        r = c.post(f"/api/admin/qa/{qa_id}", headers=A,
+                  json={"question": "Where is lost and found", "answer": "Ask any GA at the front desk"})
+        assert r.status_code == 200 and r.json()["id"] == qa_id
+        assert c.post("/api/admin/qa/999999", headers=A,
+                      json={"question": "Nonexistent?", "answer": "n/a"}).status_code == 404
+
+        # delete via the admin endpoint, not a raw ORM db.delete(), so chunks are
+        # cleaned up too (SQLite doesn't enforce ondelete=CASCADE without a pragma this
+        # project doesn't set, and a freed doc id can otherwise be reused by a later
+        # test's Doc - leaving its orphaned chunks attached to someone else's content)
+        db = SessionLocal()
+        doc_ids = [qa_id]
+        for ext_id in ("P1", "R1", "T1"):
+            d = db.scalars(select(_Doc).where(_Doc.external_id == ext_id)).first()
+            if d:
+                doc_ids.append(d.id)
+        db.close()
+        for doc_id in doc_ids:
+            c.delete(f"/api/admin/docs/{doc_id}", headers=A)
+    print("FAQ bulk import test passed")
+
+
 def test_task_heads_up_fires_once_30_min_before_due():
     with TestClient(app) as c:
         GA = {"X-GA-Key": "gakey"}
@@ -1478,6 +1585,7 @@ if __name__ == "__main__":
     test_file_cleared_on_done_and_fourteen_day_sweep()
     test_requester_confirmation_page()
     test_digest_additions_and_weekly_report()
+    test_faq_bulk_import()
     test_task_heads_up_fires_once_30_min_before_due()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()

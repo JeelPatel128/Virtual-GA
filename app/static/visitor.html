@@ -126,6 +126,10 @@ function addMsg(m) {
     const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = "Yes, get a GA";
     b.onclick = () => openSheet(); el.appendChild(b);
   }
+  if (meta.offer_task_form && !ticket) {
+    const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = "Request something from the GAs";
+    b.onclick = () => openTaskSheet(); el.appendChild(b);
+  }
   if (meta.availability_buttons && !ticket) {
     const check = document.createElement("button"); check.className = "btn small offer"; check.textContent = "Ask a GA to check";
     check.onclick = () => openSheet(); el.appendChild(check);

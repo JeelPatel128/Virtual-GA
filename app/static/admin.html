@@ -51,7 +51,9 @@
           <p class="hint">The fastest way to teach it. One question, one clear answer.</p>
           <label for="qaQ">Question</label><input id="qaQ" type="text" required maxlength="500">
           <label for="qaA">Answer</label><textarea id="qaA" rows="4" required></textarea>
-          <button class="btn" style="margin-top:10px">Save</button><div class="msgline" id="qaMsg"></div>
+          <button class="btn" style="margin-top:10px" id="qaSubmitBtn">Save</button>
+          <button type="button" class="btn quiet" style="margin-top:10px;display:none" id="qaCancelBtn">Cancel edit</button>
+          <div class="msgline" id="qaMsg"></div>
         </form>
         <form class="card" id="upForm">
           <h2>Upload a file</h2>
@@ -68,6 +70,15 @@
         <label for="nT">Title</label><input id="nT" type="text" required maxlength="300">
         <label for="nX">Text</label><textarea id="nX" rows="5" required></textarea>
         <button class="btn" style="margin-top:10px">Save</button><div class="msgline" id="nMsg"></div>
+      </form>
+      <form class="card" id="faqForm">
+        <h2>FAQ bulk import</h2>
+        <p class="hint">virtual-ga-faq.csv. Columns are matched by name, in any order. Rows marked
+        "Needs answer" are skipped. Re-importing the same id updates that row instead of duplicating it.</p>
+        <label for="faqFile">CSV file</label><input id="faqFile" type="file" required accept=".csv">
+        <button class="btn" style="margin-top:10px">Preview</button>
+        <div class="msgline" id="faqMsg"></div>
+        <div id="faqPreview"></div>
       </form>
       <form class="card" id="searchForm">
         <h2>Test what it finds</h2>
@@ -168,14 +179,35 @@ async function loadDocs() {
   $("jobs").querySelectorAll("[data-dismiss]").forEach(b => b.onclick = async () => { await api(`/api/admin/jobs/${b.dataset.dismiss}/dismiss`, { method: "POST" }); loadDocs(); });
   $("docs").innerHTML = d.docs.length ? d.docs.map(x => `<div class="doc"><div><div class="t"><span class="tag">${esc(x.kind)}</span>${esc(x.title)}</div>
     <div class="p">${esc(x.preview)}</div><div class="hint">${esc(x.created_at)}${x.added_by ? " · " + esc(x.added_by) : ""}</div></div>
-    <button class="btn small quiet" data-del="${x.id}">Delete</button></div>`).join("") : "Nothing yet. Add your first Q&A above.";
+    <div style="display:flex;gap:6px">${x.kind === "qa" ? `<button class="btn small quiet" data-edit="${x.id}">Edit</button>` : ""}
+    <button class="btn small quiet" data-del="${x.id}">Delete</button></div></div>`).join("") : "Nothing yet. Add your first Q&A above.";
   $("docs").querySelectorAll("[data-del]").forEach(b => b.onclick = async () => { if (confirm("Delete this from the knowledge base?")) { await api(`/api/admin/docs/${b.dataset.del}`, { method: "DELETE" }); loadDocs(); } });
+  $("docs").querySelectorAll("[data-edit]").forEach(b => b.onclick = async () => {
+    const doc = await api(`/api/admin/docs/${b.dataset.edit}`);
+    const answer = doc.text.includes("\nA: ") ? doc.text.split("\nA: ")[1] : doc.text;
+    startEditQa(doc.id, doc.title, answer);
+  });
   if (d.jobs.some(j => j.status === "processing")) setTimeout(loadDocs, 4000);
 }
 
+let editingQaId = null;
+function startEditQa(id, question, answer) {
+  editingQaId = id;
+  $("qaQ").value = question; $("qaA").value = answer;
+  $("qaSubmitBtn").textContent = "Save changes"; $("qaCancelBtn").style.display = "inline-block";
+  document.querySelector('nav button[data-tab="kb"]').click();
+  $("qaQ").focus();
+}
+function cancelEditQa() {
+  editingQaId = null;
+  $("qaForm").reset(); $("qaSubmitBtn").textContent = "Save"; $("qaCancelBtn").style.display = "none";
+}
+$("qaCancelBtn").onclick = cancelEditQa;
+
 $("qaForm").onsubmit = async (e) => { e.preventDefault();
-  try { await api("/api/admin/qa", { method: "POST", body: JSON.stringify({ question: $("qaQ").value, answer: $("qaA").value }) });
-    $("qaQ").value = ""; $("qaA").value = ""; flash("qaMsg", "Saved"); loadDocs(); } catch (er) { flash("qaMsg", er.message, true); } };
+  const path = editingQaId ? `/api/admin/qa/${editingQaId}` : "/api/admin/qa";
+  try { await api(path, { method: "POST", body: JSON.stringify({ question: $("qaQ").value, answer: $("qaA").value }) });
+    cancelEditQa(); flash("qaMsg", "Saved"); loadDocs(); } catch (er) { flash("qaMsg", er.message, true); } };
 $("noteForm").onsubmit = async (e) => { e.preventDefault();
   try { await api("/api/admin/note", { method: "POST", body: JSON.stringify({ title: $("nT").value, text: $("nX").value }) });
     $("nT").value = ""; $("nX").value = ""; flash("nMsg", "Saved"); loadDocs(); } catch (er) { flash("nMsg", er.message, true); } };
@@ -188,6 +220,30 @@ $("searchForm").onsubmit = async (e) => { e.preventDefault();
   const d = await api("/api/admin/search?q=" + encodeURIComponent($("sq").value));
   $("sres").innerHTML = d.hits.length ? d.hits.map(h => `<div class="doc"><div><div class="t">${esc(h.title)} <span class="hint">score ${h.score} (${h.method})</span></div><div class="p">${esc(h.text)}</div></div></div>`).join("")
     : '<p class="hint">Nothing matched. The bot would offer to get a GA.</p>'; };
+
+$("faqForm").onsubmit = async (e) => { e.preventDefault();
+  const f = $("faqFile").files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  $("faqPreview").innerHTML = "";
+  try {
+    const d = await api("/api/admin/faq/preview", { method: "POST", body: fd });
+    if (d.missing_columns.length) { flash("faqMsg", "Missing columns: " + d.missing_columns.join(", "), true); return; }
+    flash("faqMsg", "");
+    $("faqPreview").innerHTML = `<p class="hint">${d.to_import} row(s) will import, ${d.to_skip} will be skipped (Needs answer).</p>
+      <table><tr><th>Import?</th><th>Id</th><th>Type</th><th>Question</th><th>Status</th></tr>
+      ${d.rows.map(r => `<tr><td>${r.will_import ? "Yes" : "Skip"}</td><td>${esc(r.id)}</td><td>${esc(r.type)}</td>
+      <td>${esc(r.question)}</td><td>${esc(r.status)}</td></tr>`).join("")}</table>
+      <button type="button" class="btn" style="margin-top:10px" id="faqConfirmBtn">Confirm import</button>`;
+    $("faqConfirmBtn").onclick = async () => {
+      try {
+        const r = await api("/api/admin/faq/import", { method: "POST", body: fd });
+        const errs = r.errors.length ? ` (${r.errors.join("; ")})` : "";
+        flash("faqMsg", `Imported ${r.imported}, skipped ${r.skipped}${errs}`);
+        $("faqPreview").innerHTML = ""; $("faqForm").reset(); loadDocs();
+      } catch (er) { flash("faqMsg", er.message, true); }
+    };
+  } catch (er) { flash("faqMsg", er.message, true); }
+};
 
 async function loadEmailCandidates() {
   const d = await api("/api/admin/emails/candidates");

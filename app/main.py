@@ -40,6 +40,9 @@ NOT_SURE = "I'm not sure about that one, and I'd rather not guess. Want me to ge
 NO_TODAY_NOTE = "Nothing special today, just the regular front desk hours."
 TODAY_NOTE_RE = re.compile(
     r"(happening|going on|events?)\W{0,15}today|today\W{0,15}(ssb|front desk|school of business|note)", re.I)
+TASK_REDIRECT_THRESHOLD = 0.6
+TASK_REDIRECT_ANSWER = ('This sounds like something our GA team can take care of directly. Tap '
+                        '"Request something from the GAs" below to send us the details.')
 GREETING_RE = re.compile(r"^\s*(hi|hello|hey|good (morning|afternoon|evening)|thanks|thank you|ok|okay)\W*\s*$", re.I)
 
 jobs: dict[str, dict] = {}  # background upload status, in memory
@@ -227,6 +230,18 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
     history = [{"sender": m.sender, "text": m.text} for m in db.scalars(
         select(Message).where(Message.session_id == sid).order_by(Message.id.desc()).limit(7)).all()][::-1][:-1]
     hits = knowledge.search(db, text, k=5)
+
+    # a top FAQ hit of type "Task" redirects to the task-request form instead of
+    # answering normally - intercepted before the AI runs, same precedence as the
+    # directory resolver above. Logged like every other match-score decision.
+    if hits and hits[0].get("faq_type") == "Task" and hits[0]["score"] >= TASK_REDIRECT_THRESHOLD:
+        log.info("Task-type redirect: question=%r matched doc=%r score=%.3f",
+                 text, hits[0]["title"], hits[0]["score"])
+        tickets.say(db, sid, "bot", TASK_REDIRECT_ANSWER, meta={"offer_task_form": True})
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True))
+        db.commit()
+        return {"relayed": False}
+
     result = llm.answer(text, hits, history)
 
     if result is None:  # no Gemini key, or the API failed: keyword fallback
@@ -592,6 +607,34 @@ def add_qa(body: QAIn, db=Depends(get_db)):
     text = f"Q: {body.question.strip()}\nA: {body.answer.strip()}"
     d = knowledge.add_document(db, body.question, "qa", text, body.added_by)
     return {"id": d.id}
+
+
+@app.post("/api/admin/qa/{doc_id}", dependencies=[Depends(require_admin)])
+def edit_qa(doc_id: int, body: QAIn, db=Depends(get_db)):
+    try:
+        d = knowledge.update_qa_doc(db, doc_id, body.question, body.answer, body.added_by)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"id": d.id}
+
+
+@app.post("/api/admin/faq/preview", dependencies=[Depends(require_admin)])
+async def faq_preview(file: UploadFile = File(...)):
+    text = (await file.read()).decode("utf-8", errors="replace")
+    parsed = knowledge.parse_faq_csv(text)
+    rows = parsed["rows"]
+    return {"missing_columns": parsed["missing_columns"], "rows": rows,
+            "to_import": sum(1 for r in rows if r["will_import"]),
+            "to_skip": sum(1 for r in rows if not r["will_import"])}
+
+
+@app.post("/api/admin/faq/import", dependencies=[Depends(require_admin)])
+async def faq_import(file: UploadFile = File(...), added_by: str = Form(""), db=Depends(get_db)):
+    text = (await file.read()).decode("utf-8", errors="replace")
+    result = knowledge.import_faq_csv(db, text, added_by.strip() or None)
+    if result["missing_columns"]:
+        raise HTTPException(400, f"Missing columns: {', '.join(result['missing_columns'])}")
+    return result
 
 
 @app.post("/api/admin/note", dependencies=[Depends(require_admin)])

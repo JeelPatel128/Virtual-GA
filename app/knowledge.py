@@ -1,11 +1,12 @@
 """Knowledge base: turn every upload into text, chunk it, embed it, and search it."""
+import csv
 import io
 import math
 import re
 from collections import Counter
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from . import llm
 from .db import Chunk, Doc
@@ -81,6 +82,114 @@ def add_document(db, title: str, kind: str, text: str, added_by: str | None = No
     return doc
 
 
+def replace_chunks(db, doc: Doc, text: str, search_prefix: str | None = None) -> None:
+    """Deletes a Doc's existing chunks and re-chunks/re-embeds from scratch - used
+    whenever an existing Doc's content changes in place (FAQ re-import, a Q&A edit)."""
+    db.execute(delete(Chunk).where(Chunk.doc_id == doc.id))
+    pieces = chunk_text(text)
+    prefix = search_prefix if search_prefix is not None else doc.title
+    vectors = llm.embed([f"{prefix}\n{p}" for p in pieces]) or [None] * len(pieces)
+    for p, v in zip(pieces, vectors):
+        db.add(Chunk(doc_id=doc.id, text=p, embedding=v))
+
+
+def update_qa_doc(db, doc_id: int, question: str, answer: str, added_by: str | None = None) -> Doc:
+    doc = db.get(Doc, doc_id)
+    if not doc or doc.kind != "qa":
+        raise ValueError("Q&A not found")
+    text = f"Q: {question.strip()}\nA: {answer.strip()}"
+    doc.title = question.strip()[:300]
+    doc.extracted_text = text
+    if added_by:
+        doc.added_by = added_by
+    db.flush()
+    replace_chunks(db, doc, text)
+    db.commit()
+    return doc
+
+
+# ---------- FAQ bulk import (data/virtual-ga-faq.csv) ----------
+
+FAQ_CSV_COLUMNS = ["id", "category", "type", "question", "variants", "asked_by", "times_mentioned",
+                   "answer", "source", "handled_by", "changes_each_semester", "status"]
+FAQ_SKIP_STATUS = "Needs answer"
+
+
+def parse_faq_csv(text: str) -> dict:
+    """Matches columns by header name, not position, so a reordered file still imports.
+    Returns {"missing_columns": [...], "rows": []} if any expected column is absent -
+    the caller shows that list as a clear error rather than guessing."""
+    reader = csv.DictReader(io.StringIO(text))
+    header = reader.fieldnames or []
+    missing = [c for c in FAQ_CSV_COLUMNS if c not in header]
+    if missing:
+        return {"missing_columns": missing, "rows": []}
+    rows = []
+    for raw in reader:
+        get = lambda k: (raw.get(k) or "").strip()
+        status = get("status")
+        times = get("times_mentioned")
+        rows.append({
+            "id": get("id"), "category": get("category"), "type": get("type"),
+            "question": get("question"),
+            "variants": [v.strip() for v in get("variants").split("|") if v.strip()],
+            "asked_by": get("asked_by"),
+            "times_mentioned": int(times) if times.isdigit() else None,
+            "answer": get("answer"), "source": get("source"), "handled_by": get("handled_by"),
+            "changes_each_semester": get("changes_each_semester").lower() == "yes",
+            "status": status, "will_import": status != FAQ_SKIP_STATUS,
+        })
+    return {"missing_columns": [], "rows": rows}
+
+
+def upsert_faq_doc(db, row: dict, added_by: str | None = None) -> Doc:
+    """Inserts or updates (by external_id, i.e. the CSV's own id column) a Q&A Doc from
+    one imported FAQ row. Variants (alternate phrasings) are folded into the text used
+    for embedding/keyword search, but kept out of the displayed title/answer."""
+    question, answer = row["question"], row["answer"]
+    text = f"Q: {question}\nA: {answer}"
+    doc = db.scalars(select(Doc).where(Doc.external_id == row["id"])).first() if row["id"] else None
+    if doc is None:
+        doc = Doc(kind="qa", external_id=row["id"] or None)
+        db.add(doc)
+    doc.title = question[:300]
+    doc.extracted_text = text
+    doc.category = row["category"] or None
+    doc.faq_type = row["type"] or None
+    doc.variants = row["variants"]
+    doc.asked_by = row["asked_by"] or None
+    doc.times_mentioned = row["times_mentioned"]
+    doc.source = row["source"] or None
+    doc.handled_by = row["handled_by"] or None
+    doc.changes_each_semester = row["changes_each_semester"]
+    doc.status = row["status"] or None
+    if added_by:
+        doc.added_by = added_by
+    db.flush()
+    search_prefix = "\n".join([question, *row["variants"]])
+    replace_chunks(db, doc, text, search_prefix)
+    db.commit()
+    return doc
+
+
+def import_faq_csv(db, text: str, added_by: str | None = None) -> dict:
+    parsed = parse_faq_csv(text)
+    if parsed["missing_columns"]:
+        return {"missing_columns": parsed["missing_columns"], "imported": 0, "skipped": 0, "errors": []}
+    imported = skipped = 0
+    errors = []
+    for row in parsed["rows"]:
+        if not row["will_import"]:
+            skipped += 1
+            continue
+        try:
+            upsert_faq_doc(db, row, added_by)
+            imported += 1
+        except Exception as e:
+            errors.append(f"{row['id'] or '(no id)'}: {e}")
+    return {"missing_columns": [], "imported": imported, "skipped": skipped, "errors": errors}
+
+
 def reembed_missing(db) -> int:
     """Embed chunks that were added before the Gemini key existed."""
     rows = db.execute(select(Chunk, Doc.title).join(Doc).where(Chunk.embedding.is_(None))).all()
@@ -119,7 +228,9 @@ def search(db, query: str, k: int = 5) -> list[dict]:
         # Keyword fallback (BM25-lite) so the bot still works without an API key.
         # Score = share of the query's (idf-weighted) words found in the chunk, 0 to 1.
         qt = set(_tokens(query))
-        docs_tokens = [set(_tokens(d.title + " " + c.text)) for c, d in rows]
+        # FAQ variants (alternate phrasings) are searchable even though they're kept out
+        # of the displayed title/chunk text.
+        docs_tokens = [set(_tokens(d.title + " " + c.text + " " + " ".join(d.variants or []))) for c, d in rows]
         n = len(rows)
         df = Counter(t for dt in docs_tokens for t in dt)
         idf = {t: math.log(1 + n / (df[t] or 0.5)) for t in qt}
@@ -130,6 +241,6 @@ def search(db, query: str, k: int = 5) -> list[dict]:
     results.sort(key=lambda r: r[0], reverse=True)
     return [
         {"id": c.id, "doc_id": d.id, "title": d.title, "kind": d.kind, "text": c.text,
-         "score": round(s, 3), "method": method}
+         "score": round(s, 3), "method": method, "faq_type": d.faq_type}
         for s, c, d in results[:k] if s > 0
     ]

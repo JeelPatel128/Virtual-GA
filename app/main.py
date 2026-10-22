@@ -298,13 +298,17 @@ class ActionIn(BaseModel):
     text: str | None = Field(None, max_length=2000)
 
 
+class ClaimIn(BaseModel):
+    ga_name: str = Field(min_length=1, max_length=120)
+
+
 def _ticket_json(db, t: Ticket, full: bool) -> dict:
     s = db.get(ChatSession, t.session_id)
     out = {"id": t.id, "status": t.status, "question": t.question, "visitor_name": s.visitor_name,
            "has_phone": bool(s.visitor_phone), "on_shift": t.on_shift, "responded_by": t.responded_by,
            "created_at": tickets.local(t.created_at).strftime("%a %I:%M %p"),
            "waiting_minutes": int((utcnow() - t.created_at).total_seconds() // 60),
-           "escalated": bool(t.escalated_at)}
+           "escalated": bool(t.escalated_at), "owner": t.owner}
     if full:
         out["visitor_phone"] = s.visitor_phone
         msgs = db.scalars(select(Message).where(Message.session_id == t.session_id).order_by(Message.id)).all()
@@ -343,6 +347,16 @@ def ga_ticket(ticket_id: int, db=Depends(get_db)):
     if not t:
         raise HTTPException(404)
     return _ticket_json(db, t, True)
+
+
+@app.post("/api/ga/ticket/{ticket_id}/claim", dependencies=[Depends(ticket_access)])
+def ga_ticket_claim(ticket_id: int, body: ClaimIn, db=Depends(get_db)):
+    t = db.get(Ticket, ticket_id)
+    if not t:
+        raise HTTPException(404)
+    if not tickets.claim_ticket(db, ticket_id, body.ga_name.strip()):
+        raise HTTPException(409, "Already claimed by someone else")
+    return _ticket_json(db, db.get(Ticket, ticket_id), True)
 
 
 @app.post("/api/ga/ticket/{ticket_id}/action", dependencies=[Depends(ticket_access)])

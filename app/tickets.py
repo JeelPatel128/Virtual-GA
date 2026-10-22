@@ -4,7 +4,7 @@ import hmac
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from . import schedule, teams
 from .config import lead_ga, load_team, settings
@@ -124,6 +124,40 @@ def create_message_ticket(db, sess: ChatSession, question: str, person) -> Ticke
     ))
     db.commit()
     return t
+
+
+# ---------- ownership (Reliability pack) ----------
+
+def claim_ticket(db, ticket_id: int, ga_name: str) -> bool:
+    """True if this GA just became the owner; False if someone else already claimed it
+    first. Enforced by the database itself - a single conditional UPDATE - not an
+    application-level lock, so a real race between two GAs can only ever have one
+    winner: whichever request the database engine applies first still matches
+    `owner IS NULL`, and the loser's WHERE clause no longer matches anything, so its
+    update (including the owner_history it computed) never takes effect."""
+    t = db.get(Ticket, ticket_id)
+    if t is None:
+        raise ValueError("Ticket not found")
+    entry = {"ga": ga_name, "assigned_at": utcnow().isoformat(), "unassigned_at": None, "reason": "claimed"}
+    new_history = (t.owner_history or []) + [entry]
+    result = db.execute(update(Ticket).where(Ticket.id == ticket_id, Ticket.owner.is_(None))
+                        .values(owner=ga_name, owner_history=new_history))
+    db.commit()
+    return result.rowcount == 1
+
+
+def reassign_ticket(db, t: Ticket, to_ga: str, reason: str) -> None:
+    """Hands ownership to someone else outright (used by shift handoff, the 3rd-snooze
+    rule, and a manual reassign) - no claim race here since the caller already holds
+    (or is acting on behalf of) the current owner."""
+    now = utcnow()
+    history = list(t.owner_history or [])
+    if history and history[-1].get("unassigned_at") is None:
+        history[-1]["unassigned_at"] = now.isoformat()
+    history.append({"ga": to_ga, "assigned_at": now.isoformat(), "unassigned_at": None, "reason": reason})
+    t.owner = to_ga
+    t.owner_history = history
+    db.commit()
 
 
 # ---------- GA responses from the console ----------

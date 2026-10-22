@@ -92,6 +92,37 @@ def test_migration_adds_columns_to_old_tables():
     eng.dispose()
 
 
+def test_claim_is_atomic_only_one_wins():
+    with TestClient(app) as c:
+        sid = c.post("/api/session").json()["session_id"]
+        tid = c.post(f"/api/session/{sid}/handoff", json={"name": "Alex", "question": "help"}).json()["ticket_id"]
+
+        t = c.get(f"/api/ga/ticket/{tid}", headers={"X-GA-Key": "gakey"}).json()
+        assert t["owner"] is None
+
+        GA = {"X-GA-Key": "gakey"}
+        r1 = c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
+        assert r1.status_code == 200 and r1.json()["owner"] == "GA Two", r1.text
+
+        r2 = c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "Jeel Patel"})
+        assert r2.status_code == 409, r2.text
+
+        t = c.get(f"/api/ga/ticket/{tid}", headers={"X-GA-Key": "gakey"}).json()
+        assert t["owner"] == "GA Two", "the second claim must not have overwritten the first"
+
+        from app.db import Ticket as _Ticket
+        db = SessionLocal()
+        row = db.get(_Ticket, tid)
+        assert row.owner_history[-1]["ga"] == "GA Two" and row.owner_history[-1]["reason"] == "claimed"
+        assert len(row.owner_history) == 1, "a losing claim must not append a spurious history entry"
+        # delete, not resolve: digest_data() aggregates ALL of today's tickets regardless
+        # of status, and this row is disposable test fixture data (same lesson as the
+        # message-ticket test above)
+        db.delete(row)
+        db.commit(); db.close()
+    print("claim atomicity test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -793,6 +824,7 @@ def test_full_flow():
 
 if __name__ == "__main__":
     test_migration_adds_columns_to_old_tables()
+    test_claim_is_atomic_only_one_wins()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

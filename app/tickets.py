@@ -48,7 +48,8 @@ def open_ticket_for(db, session_id: str) -> Ticket | None:
 def create_ticket(db, sess: ChatSession, question: str) -> Ticket:
     on_shift = schedule.on_shift_now()
     lead = lead_ga()
-    t = Ticket(session_id=sess.id, question=question.strip()[:2000], on_shift=[g.name for g in on_shift])
+    t = Ticket(session_id=sess.id, question=question.strip()[:2000], on_shift=[g.name for g in on_shift],
+              next_deadline=utcnow() + timedelta(minutes=settings.ESCALATE_AFTER_MINUTES))
     db.add(t)
     db.flush()
 
@@ -93,13 +94,13 @@ def create_message_ticket(db, sess: ChatSession, question: str, person) -> Ticke
     """"Leave a message" for a specific person, found through the directory resolver.
     Unlike a normal handoff, the deadline is the end of the current shift (not 5 minutes)
     since nobody needs to drop what they're doing - but it still goes through the exact
-    same escalate_overdue() chain so it can't be forgotten."""
+    same reminder ladder (check_reminders) so it can't be forgotten."""
     on_shift = schedule.on_shift_now()
     lead = lead_ga()
     shift_end = schedule.current_shift_end()
-    deadline = _to_naive_utc(shift_end) if shift_end else None
+    deadline = _to_naive_utc(shift_end) if shift_end else utcnow() + timedelta(minutes=settings.ESCALATE_AFTER_MINUTES)
     t = Ticket(session_id=sess.id, question=question.strip()[:2000], on_shift=[g.name for g in on_shift],
-              kind="message", recipient_person_id=person.id, deadline_at=deadline)
+              kind="message", recipient_person_id=person.id, next_deadline=deadline)
     db.add(t)
     db.flush()
 
@@ -283,35 +284,60 @@ def confirm_reached(db, t: Ticket, reached: bool) -> None:
 
 # ---------- periodic work, called by an external cron every minute ----------
 
-def escalate_overdue(db) -> int:
-    now = utcnow()
-    candidates = db.scalars(select(Ticket).where(Ticket.status == "new", Ticket.first_response_at.is_(None),
-                                                 Ticket.escalated_at.is_(None))).all()
-    # A message ticket's deadline is the end of the current shift, stored on the row at
-    # creation; a normal visitor ticket has no stored deadline, so it falls back to the
-    # fixed ESCALATE_AFTER_MINUTES window (same behavior as before this existed).
-    overdue = [t for t in candidates
-              if (t.deadline_at or t.created_at + timedelta(minutes=settings.ESCALATE_AFTER_MINUTES)) <= now]
+REMINDER_LABELS = {1: "Reminder", 2: "Still waiting", 3: "Escalated to lead", 4: "Team alert"}
+
+
+def _ga_by_name(name: str | None):
+    return next((g for g in load_team() if g.name == name), None) if name else None
+
+
+def _reminder_targets(t: Ticket) -> list:
+    """Steps 1-2 target the actual owner if claimed; if unclaimed, whoever is on shift
+    *right now* (live lookup, not the stale on_shift snapshot from creation) - or the
+    lead if nobody's on shift at all. Step 3 is always the lead, step 4 is always every
+    GA in team.json - this function (and everywhere else in this module) only ever
+    builds a mention list from team.json, never from the directory (SSB staff)."""
     lead = lead_ga()
-    for t in overdue:
-        sess = db.get(ChatSession, t.session_id)
-        waited = int((utcnow() - t.created_at).total_seconds() // 60)
+    if t.owner:
+        ga = _ga_by_name(t.owner)
+        return [ga] if ga else ([lead] if lead else [])
+    on_shift = schedule.on_shift_now()
+    return on_shift if on_shift else ([lead] if lead else [])
+
+
+def check_reminders(db) -> int:
+    """The reminder ladder: every open ticket's next_deadline is checked against the
+    current time, one tick at a time. If several steps are overdue at once (e.g. the
+    server slept through some ticks), exactly one card is sent, at the *highest* overdue
+    step, naming which earlier steps were missed - never one card per missed step."""
+    now = utcnow()
+    candidates = db.scalars(select(Ticket).where(Ticket.status.in_(OPEN_STATUSES),
+                                                  Ticket.next_deadline.is_not(None))).all()
+    fired = 0
+    for t in candidates:
+        if t.next_deadline > now:
+            continue
+        overdue_minutes = (now - t.next_deadline).total_seconds() / 60
+        step = min(4, 1 + int(overdue_minutes // settings.REMINDER_STEP_MINUTES))
+        if step <= t.last_reminder_step:
+            continue
+        missed = list(range(t.last_reminder_step + 1, step))
+        missed_note = f" (missed step{'s' if len(missed) > 1 else ''} {', '.join(map(str, missed))})" if missed else ""
+        lead_name = "Unclaimed" if not t.owner else t.owner
         teams.post(teams.build_card(
-            title=f"No response after {waited} minutes",
-            mention=[lead] if lead else [],
+            title=f"{REMINDER_LABELS[step]}{missed_note}",
+            mention=_reminder_targets(t),
             body_text=f"“{t.question}”",
-            lines=[
-                ("Visitor", sess.visitor_name or "Not given"),
-                ("Was alerted", ", ".join(t.on_shift) or "Nobody on shift"),
-                ("Ticket", f"#{t.id}, waiting since {local(t.created_at).strftime('%I:%M %p')}"),
-            ],
+            lines=[("Owner", lead_name), ("Ticket", f"#{t.id}")],
             buttons=[("Open and respond", ticket_url(t.id))],
-            style="urgent",
+            style="default" if step == 1 else "urgent",
         ))
-        say(db, t.session_id, "system", "Sorry for the wait. I've flagged this to the lead GA as well.")
-        t.escalated_at = utcnow()
+        if t.escalated_at is None:
+            t.escalated_at = now
+        t.last_reminder_step = step
+        fired += 1
     db.commit()
-    return len(overdue)
+    return fired
 
 
 def purge_old_phone_numbers(db) -> int:
@@ -369,7 +395,7 @@ def send_digest(db, day_local: datetime | None = None) -> dict:
 
 
 def tick(db) -> dict:
-    result = {"escalated": escalate_overdue(db), "digest_sent": False, "phones_purged": 0}
+    result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0}
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
     if now.hour >= settings.DIGEST_HOUR and kv_get(db, "digest_date") != today:

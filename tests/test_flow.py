@@ -214,6 +214,64 @@ def test_structured_snooze_and_third_snooze_auto_escalates():
     print("structured snooze / 3rd-snooze escalation test passed")
 
 
+def test_reminder_ladder_catchup_offshift_and_autoclaim():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        from app.db import Ticket as _Ticket, utcnow as db_utcnow
+
+        # --- reply on an unowned ticket auto-claims it ---
+        sid = c.post("/api/session").json()["session_id"]
+        tid = c.post(f"/api/session/{sid}/handoff", json={"name": "A", "question": "q"}).json()["ticket_id"]
+        r = c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+                  json={"ga_name": "GA Two", "action": "reply", "text": "on it"})
+        assert r.status_code == 200 and r.json()["owner"] == "GA Two", r.text
+        db = SessionLocal()
+        db.delete(db.get(_Ticket, tid)); db.commit(); db.close()
+
+        # --- catch-up: several missed steps at once still send exactly one card ---
+        sid2 = c.post("/api/session").json()["session_id"]
+        tid2 = c.post(f"/api/session/{sid2}/handoff", json={"name": "B", "question": "q2"}).json()["ticket_id"]
+        db = SessionLocal()
+        row2 = db.get(_Ticket, tid2)
+        row2.next_deadline = db_utcnow() - timedelta(minutes=50)  # would be step 4 (3 steps missed)
+        db.commit()
+        teams.sent_cards.clear()
+        fired = tickets.check_reminders(db)
+        assert fired == 1, fired
+        assert len(teams.sent_cards) == 1, "exactly one card, never one per missed step"
+        card = teams.sent_cards[0]
+        assert title(card) == "Team alert (missed steps 1, 2, 3)", title(card)
+        db.refresh(row2)
+        assert row2.last_reminder_step == 4
+        db.delete(row2); db.commit(); db.close()
+
+        # --- off-shift GA is never reminded for an unclaimed item ---
+        # GA Two was on shift when this ticket was created (captured in on_shift), but the
+        # calendar now shows only Jeel Patel on shift - the stale on_shift snapshot must
+        # not be used for who gets reminded.
+        sid3 = c.post("/api/session").json()["session_id"]
+        tid3 = c.post(f"/api/session/{sid3}/handoff", json={"name": "C", "question": "q3"}).json()["ticket_id"]
+        db = SessionLocal()
+        row3 = db.get(_Ticket, tid3)
+        assert "GA Two" in row3.on_shift, row3.on_shift  # sanity: it WAS on the creation-time snapshot
+        row3.next_deadline = db_utcnow() - timedelta(minutes=1)
+        db.commit()
+        write_ics([("Jeel Patel - Front Desk", now - timedelta(hours=1), now + timedelta(hours=2))])  # GA Two now off
+        teams.sent_cards.clear()
+        tickets.check_reminders(db)
+        esc = teams.sent_cards[-1]
+        assert "two@stevens.edu" not in mentions(esc), esc
+        assert mentions(esc) == ["jp@stevens.edu"], esc
+        db.delete(db.get(_Ticket, tid3)); db.commit(); db.close()
+        # restore the shared ICS for any later test that depends on GA Two being on shift
+        write_ics([
+            ("Jeel Patel - Front Desk", now - timedelta(hours=1), now + timedelta(hours=2)),
+            ("Desk: Two", now - timedelta(hours=1), now + timedelta(hours=2)),
+            ("GA Three - Front Desk", now + timedelta(hours=3), now + timedelta(hours=5)),
+        ])
+    print("reminder ladder catch-up / off-shift / auto-claim test passed")
+
+
 def mentions(card):
     return [e["mentioned"]["id"] for e in card["attachments"][0]["content"]["msteams"]["entities"]]
 
@@ -624,19 +682,20 @@ def test_message_ticket_deadline_and_escalation():
         db = SessionLocal()
         t = db.get(Ticket, tid)
         assert t.kind == "message" and t.recipient_person_id == person_id
-        assert t.deadline_at is not None
-        minutes_out = (t.deadline_at - db_utcnow()).total_seconds() / 60
+        assert t.next_deadline is not None
+        minutes_out = (t.next_deadline - db_utcnow()).total_seconds() / 60
         assert minutes_out > 60, "deadline should be the end of the ~3hr shift window, not +5 min"
 
-        # make it overdue and confirm the normal escalation chain picks it up (call
-        # escalate_overdue directly, not the combined /tasks/tick, so this doesn't also
+        # make it overdue and confirm the reminder ladder picks it up (call
+        # check_reminders directly, not the combined /tasks/tick, so this doesn't also
         # trip the once-a-day digest flag and leak that into a later test)
-        t.deadline_at = db_utcnow() - timedelta(minutes=1)
+        t.next_deadline = db_utcnow() - timedelta(minutes=1)
         db.commit()
         teams.sent_cards.clear()
-        assert tickets.escalate_overdue(db) == 1
-        esc = next(card for card in teams.sent_cards if title(card).startswith("No response after"))
-        assert mentions(esc) == ["jp@stevens.edu"], esc
+        assert tickets.check_reminders(db) == 1
+        esc = next(card for card in teams.sent_cards if title(card) == "Reminder")
+        # unclaimed: step 1 targets whoever is actually on shift right now, not the lead alone
+        assert set(mentions(esc)) == {"jp@stevens.edu", "two@stevens.edu"}, esc
 
         # delete, not just resolve: digest_data() aggregates ALL of today's tickets
         # regardless of status, and this row is disposable test fixture data that would
@@ -856,18 +915,20 @@ def test_full_flow():
         assert c.get("/tasks/tick?key=cronkey").json()["digest_sent"] is False
         assert c.get("/tasks/tick?key=bad").status_code == 401
 
-        # a second visitor whose ticket goes unanswered for 6 minutes -> lead gets escalated
+        # a second visitor whose ticket goes unanswered for 6 minutes -> the reminder
+        # ladder's step 1 fires, targeting whoever is actually on shift right now (not
+        # just the lead - that's step 3, covered by the dedicated ladder tests)
         sid2 = c.post("/api/session").json()["session_id"]
         tid2 = c.post(f"/api/session/{sid2}/handoff", json={"name": "Prof. Lee", "question": "Projector in room 1 is broken"}).json()["ticket_id"]
         db = SessionLocal()
-        db.get(Ticket, tid2).created_at -= timedelta(minutes=6)
+        from app.db import utcnow as db_utcnow2
+        db.get(Ticket, tid2).next_deadline = db_utcnow2() - timedelta(minutes=6)
         db.commit(); db.close()
         teams.sent_cards.clear()
         assert c.get("/tasks/tick?key=cronkey").json()["escalated"] == 1
         esc = teams.sent_cards[-1]
-        assert title(esc).startswith("No response after 6 minutes") and mentions(esc) == ["jp@stevens.edu"]
-        assert c.get("/tasks/tick?key=cronkey").json()["escalated"] == 0  # only once
-        assert "flagged this to the lead" in c.get(f"/api/session/{sid2}/messages").json()["messages"][-1]["text"]
+        assert title(esc) == "Reminder" and set(mentions(esc)) == {"jp@stevens.edu", "two@stevens.edu"}
+        assert c.get("/tasks/tick?key=cronkey").json()["escalated"] == 0  # only once (same step, not re-fired)
 
         # GA responds on ticket 1: on my way, reply, resolve
         act = lambda body: c.post(f"/api/ga/ticket/{tid}/action?t={token}", json={"ga_name": "GA Two", **body})
@@ -922,6 +983,7 @@ if __name__ == "__main__":
     test_claim_is_atomic_only_one_wins()
     test_on_my_way_deadline_and_confirmation()
     test_structured_snooze_and_third_snooze_auto_escalates()
+    test_reminder_ladder_catchup_offshift_and_autoclaim()
     test_directory_import_upserts_and_preserves_edits()
     test_directory_name_matching_and_building_formats()
     test_extension_hidden_unless_admin_enables_it()

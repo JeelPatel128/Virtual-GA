@@ -52,6 +52,7 @@ class Settings:
 
     # Behaviour
     ESCALATE_AFTER_MINUTES = int(os.getenv("ESCALATE_AFTER_MINUTES", "5"))
+    REMINDER_STEP_MINUTES = int(os.getenv("REMINDER_STEP_MINUTES", "15"))
     DIGEST_HOUR = int(os.getenv("DIGEST_HOUR", "17"))  # local time, 24h
     PHONE_RETENTION_DAYS = int(os.getenv("PHONE_RETENTION_DAYS", "30"))
     MAX_BOT_QUESTIONS_PER_HOUR = int(os.getenv("MAX_BOT_QUESTIONS_PER_HOUR", "30"))

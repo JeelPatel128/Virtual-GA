@@ -363,6 +363,7 @@ def test_shift_start_first_tick_sends_nothing_then_detects_new_shift():
         card = teams.sent_cards[-1]
         assert title(card) == "Shift starting: here's what's open"
         assert mentions(card) == ["three@stevens.edu"]
+        assert "No 'Today at SSB' note set yet" in json.dumps(card)
 
         # calling again with the same on-shift set sends nothing more
         teams.sent_cards.clear()
@@ -375,6 +376,47 @@ def test_shift_start_first_tick_sends_nothing_then_detects_new_shift():
             ("GA Three - Front Desk", now + timedelta(hours=3), now + timedelta(hours=5)),
         ])
     print("shift-start detection test passed")
+
+
+def test_today_note_expiry_ga_endpoints_and_ask_shortcircuit():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        from app.db import get_today_note as db_get_note, set_today_note as db_set_note, kv_set as db_kv_set
+
+        db = SessionLocal()
+        assert db_get_note(db) is None
+        db_set_note(db, "Career fair in the atrium, 10am-2pm")
+        db.commit()
+        assert db_get_note(db) == "Career fair in the atrium, 10am-2pm"
+
+        # expires at midnight America/New_York - a leftover note from a previous day
+        # must never be shown, regardless of how it got into KV
+        db_kv_set(db, "today_note", json.dumps({"text": "Yesterday's note", "date": "2020-01-01"}))
+        db.commit()
+        assert db_get_note(db) is None
+        db.close()
+
+        # GA console endpoints (GA key, not admin - front-desk GAs maintain this daily)
+        assert c.get("/api/ga/today-note").status_code == 401
+        assert c.get("/api/ga/today-note", headers=GA).json()["text"] == ""
+        r = c.post("/api/ga/today-note", headers=GA, json={"text": "Room 203 closed for cleaning today"})
+        assert r.status_code == 200 and r.json()["text"] == "Room 203 closed for cleaning today"
+        assert c.get("/api/ga/today-note", headers=GA).json()["text"] == "Room 203 closed for cleaning today"
+
+        # the bot answers a "what's happening today" question directly with the note
+        sid = c.post("/api/session").json()["session_id"]
+        r2 = c.post(f"/api/session/{sid}/ask", json={"text": "Anything going on today at SSB?"})
+        assert r2.json()["relayed"] is False
+        last = c.get(f"/api/session/{sid}/messages").json()["messages"][-1]
+        assert last["text"] == "Room 203 closed for cleaning today"
+
+        # clear it: the bot falls back to a plain "nothing special" default
+        c.post("/api/ga/today-note", headers=GA, json={"text": ""})
+        sid2 = c.post("/api/session").json()["session_id"]
+        c.post(f"/api/session/{sid2}/ask", json={"text": "What's happening today?"})
+        last2 = c.get(f"/api/session/{sid2}/messages").json()["messages"][-1]
+        assert last2["text"] == "Nothing special today, just the regular front desk hours."
+    print("today-at-SSB note test passed")
 
 
 def test_storage_module_degrades_and_builds_correct_requests():
@@ -1423,6 +1465,7 @@ if __name__ == "__main__":
     test_reminder_ladder_catchup_offshift_and_autoclaim()
     test_shift_end_headsup_and_conditional_reassignment()
     test_shift_start_first_tick_sends_nothing_then_detects_new_shift()
+    test_today_note_expiry_ga_endpoints_and_ask_shortcircuit()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

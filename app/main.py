@@ -17,7 +17,8 @@ from sqlalchemy import func, select
 
 from . import directory, knowledge, llm, schedule, storage, teams, tickets
 from .config import BASE_DIR, load_team, settings
-from .db import ChatSession, Doc, Message, Person, QueryLog, SessionLocal, TaskFile, Ticket, init_db, utcnow
+from .db import (ChatSession, Doc, Message, Person, QueryLog, SessionLocal, TaskFile, Ticket, get_today_note,
+                 init_db, set_today_note, utcnow)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("virtual_ga")
@@ -36,6 +37,9 @@ GREETING = ("Hi! I'm the Virtual GA for the School of Business front desk. Ask m
             "like where a room is, how to get a form, or who to talk to. If I can't help, "
             "I'll get a GA for you.")
 NOT_SURE = "I'm not sure about that one, and I'd rather not guess. Want me to get a GA to help you?"
+NO_TODAY_NOTE = "Nothing special today, just the regular front desk hours."
+TODAY_NOTE_RE = re.compile(
+    r"(happening|going on|events?)\W{0,15}today|today\W{0,15}(ssb|front desk|school of business|note)", re.I)
 GREETING_RE = re.compile(r"^\s*(hi|hello|hey|good (morning|afternoon|evening)|thanks|thank you|ok|okay)\W*\s*$", re.I)
 
 jobs: dict[str, dict] = {}  # background upload status, in memory
@@ -201,6 +205,13 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
     resolved = directory.resolve(db, sess, text)
     if resolved is not None:
         tickets.say(db, sid, "bot", resolved["answer"], meta=resolved.get("meta", {}))
+        db.commit()
+        return {"relayed": False}
+
+    if TODAY_NOTE_RE.search(text):
+        answer = get_today_note(db) or NO_TODAY_NOTE
+        tickets.say(db, sid, "bot", answer)
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True))
         db.commit()
         return {"relayed": False}
 
@@ -404,6 +415,22 @@ def ga_team(tid: int | None = None, t: str | None = None, x_ga_key: str | None =
     if not ok:
         raise HTTPException(401, "Wrong GA key")
     return {"names": [g.name for g in load_team()], "on_shift": [g.name for g in schedule.on_shift_now()]}
+
+
+class TodayNoteIn(BaseModel):
+    text: str = Field("", max_length=500)
+
+
+@app.get("/api/ga/today-note", dependencies=[Depends(require_ga)])
+def ga_today_note(db=Depends(get_db)):
+    return {"text": get_today_note(db) or ""}
+
+
+@app.post("/api/ga/today-note", dependencies=[Depends(require_ga)])
+def ga_set_today_note(body: TodayNoteIn, db=Depends(get_db)):
+    set_today_note(db, body.text)
+    db.commit()
+    return {"text": get_today_note(db) or ""}
 
 
 @app.get("/api/ga/directory/search", dependencies=[Depends(require_ga)])

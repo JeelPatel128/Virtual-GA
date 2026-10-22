@@ -1,6 +1,8 @@
 """Database models. SQLite locally, Supabase Postgres in production (same code)."""
+import json
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text,
                         create_engine, JSON)
@@ -275,3 +277,20 @@ def kv_set(db, key: str, value: str) -> None:
         row.value = value
     else:
         db.add(KV(key=key, value=value))
+
+
+def get_today_note(db) -> str | None:
+    """The GA-maintained "what's happening at SSB today" note. Expires at midnight
+    America/New_York (not server-local time) - a stale note from a previous day is
+    never shown."""
+    raw = kv_get(db, "today_note")
+    if not raw:
+        return None
+    data = json.loads(raw)
+    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    return data["text"] if data.get("date") == today else None
+
+
+def set_today_note(db, text: str) -> None:
+    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    kv_set(db, "today_note", json.dumps({"text": text.strip()[:500], "date": today}))

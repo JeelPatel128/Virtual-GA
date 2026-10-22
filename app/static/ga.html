@@ -177,6 +177,11 @@ async function dirSearch() {
   ).join("") : '<p class="hint">No matches.</p>';
 }
 
+async function loadTodayNote() {
+  const d = await api("/api/ga/today-note");
+  $("todayNote").value = d.text;
+}
+
 async function listView(force) {
   if (!key) return loginView();
   let d;
@@ -185,6 +190,10 @@ async function listView(force) {
   if (!force && sig === lastRender) return; lastRender = sig;
   $("title").textContent = "Open front desk requests";
   app.innerHTML = `<p class="hint">On shift now: ${esc(onShift.join(", ") || "nobody on the calendar")}</p>` +
+    `<div class="card"><h3 style="margin:0 0 10px;font-size:15px">Today at SSB</h3>
+    <p class="hint">Events, closures, anything visitors might ask about today. Visible to visitors who ask.</p>
+    <form id="noteForm"><textarea id="todayNote" rows="2" maxlength="500" placeholder="Nothing noted yet"></textarea>
+    <button class="btn small" style="margin-top:8px">Save</button><span class="hint" id="noteMsg"></span></form></div>` +
     (d.tickets.length ? d.tickets.map(t => `
     <a class="card list-item" href="/ga/ticket/${t.id}">
       <span class="pill ${t.status}">${label[t.status] || t.status}</span>
@@ -196,6 +205,13 @@ async function listView(force) {
     `<div class="card"><h3 style="margin:0 0 10px;font-size:15px">Directory</h3>
     <input id="dirQ" type="search" placeholder="Search a name, alias, or topic..."><div id="dirResults"></div></div>`;
   $("dirQ").oninput = dirSearch;
+  loadTodayNote();
+  $("noteForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("/api/ga/today-note", { method: "POST", body: JSON.stringify({ text: $("todayNote").value }) });
+      $("noteMsg").textContent = "Saved"; setTimeout(() => { $("noteMsg").textContent = ""; }, 3000); }
+    catch (er) { $("noteMsg").textContent = er.message; }
+  };
 }
 
 const render = (force) => ticketId ? ticketView(force) : listView(force);

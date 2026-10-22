@@ -12,7 +12,8 @@ from sqlalchemy import func, select, update
 
 from . import schedule, storage, teams
 from .config import lead_ga, load_team, settings
-from .db import ChatSession, Message, QueryLog, ReminderLog, TaskFile, Ticket, kv_get, kv_set, utcnow
+from .db import (ChatSession, Message, QueryLog, ReminderLog, TaskFile, Ticket, get_today_note, kv_get,
+                 kv_set, utcnow)
 
 log = logging.getLogger("virtual_ga.tickets")
 TZ = ZoneInfo(settings.TIMEZONE)
@@ -722,10 +723,10 @@ def check_task_heads_up(db) -> int:
 def check_shift_starts(db) -> int:
     """A GA newly appearing in on_shift_now() since the last tick (diffed against a KV
     snapshot) gets a start-of-shift card: what's currently open, owned by whom, and its
-    deadline. The very first tick this app has ever run (no snapshot yet) only saves the
-    baseline and sends nothing - otherwise every GA already on shift at deploy time would
-    get a false "you just started" card. (The "Today at SSB" reminder this card is meant
-    to also nudge about doesn't exist yet - added when that note feature lands.)"""
+    deadline, and reminds them to keep the "Today at SSB" note current. The very first
+    tick this app has ever run (no snapshot yet) only saves the baseline and sends
+    nothing - otherwise every GA already on shift at deploy time would get a false
+    "you just started" card."""
     current = {g.name for g in schedule.on_shift_now()}
     stored = kv_get(db, "on_shift_snapshot")
     kv_set(db, "on_shift_snapshot", json.dumps(sorted(current)))
@@ -737,6 +738,8 @@ def check_shift_starts(db) -> int:
         return 0
     open_tickets = db.scalars(select(Ticket).where(Ticket.status.in_(OPEN_STATUSES))).all()
     lines = [(f"#{t.id}", f"{t.owner or 'Unclaimed'} - {t.question[:50]}") for t in open_tickets[:10]]
+    note = get_today_note(db)
+    note_line = f"Today at SSB: {note}" if note else "No 'Today at SSB' note set yet - add one in the GA console."
     sent = 0
     for ga_name in newly_started:
         ga = _ga_by_name(ga_name)
@@ -744,6 +747,7 @@ def check_shift_starts(db) -> int:
             title="Shift starting: here's what's open",
             mention=[ga] if ga else [],
             lines=lines or [("Nothing open", "Quiet desk")],
+            body_text=note_line,
             buttons=[("Open GA console", f"{settings.PUBLIC_BASE_URL}/ga")],
         ))
         sent += 1

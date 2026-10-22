@@ -298,6 +298,29 @@ def test_remembered_person_pronoun_followup():
     print("remembered person / pronoun follow-up test passed")
 
 
+def test_role_matching():
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        last = _ask_text(c, sid, "my grad advisor")
+        assert "Lisa Burns" in last["text"], last
+        assert "Lisa Cavanaugh" not in last["text"], last
+
+        last = _ask_text(c, sid, "COPA person")
+        assert "Copa Fixture" in last["text"], last
+
+        last = _ask_text(c, sid, "Capstone")
+        assert "Christina Alwell" in last["text"], last
+
+        last = _ask_text(c, sid, "PhD forms")
+        assert "Phd Fixture" in last["text"], last
+
+        last = _ask_text(c, sid, "the Dean")
+        assert "GJ de Vreede" in last["text"], last
+    print("role matching test passed")
+
+
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
@@ -457,4 +480,5 @@ if __name__ == "__main__":
     test_extension_hidden_unless_admin_enables_it()
     test_disambiguation_buttons()
     test_remembered_person_pronoun_followup()
+    test_role_matching()
     test_full_flow()

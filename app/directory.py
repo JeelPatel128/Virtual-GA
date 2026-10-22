@@ -159,8 +159,12 @@ def _core_words(text: str) -> list[str]:
     title word (e.g. "professor") otherwise inflates the character-ratio score for two
     completely different surnames ("Professor Nguyen" vs "Professor Chen" scored 0.80
     on the raw strings - high enough to falsely trigger disambiguation - verified, then
-    fixed, during testing)."""
-    return [w for w in _norm(text) if len(w) > 1 and w not in NAME_FILLER_WORDS and not _is_title_word(w)]
+    fixed, during testing). Exception: if stripping title words would wipe out the phrase
+    entirely, keep them - "the Dean" is a literal alias where "Dean" IS the distinguishing
+    word, not decoration (caught when it stopped matching GJ de Vreede at all)."""
+    filler_stripped = [w for w in _norm(text) if len(w) > 1 and w not in NAME_FILLER_WORDS]
+    title_stripped = [w for w in filler_stripped if not _is_title_word(w)]
+    return title_stripped if title_stripped else filler_stripped
 
 
 def _ngrams(words: list[str], max_n: int = 4):
@@ -208,9 +212,73 @@ def _name_candidates(db, text: str) -> list[tuple["Person", float, str]]:
     return []
 
 
+# Role phrases ("academic advisor (graduate)", "COPA, careers, resume help, recruiters") are
+# matched by token recall, not character ratio: ratio("grad advisor", "academic advisor
+# (graduate)") = 0.51 loses to ratio("grad advisor", "academic advisor") = 0.71, which would
+# make the plain "academic advisor" role win over the graduate-specific one for the exact
+# spec test case ("my grad advisor" -> Lisa Burns) - verified, then fixed, during design.
+ROLE_SYNONYMS = {"grad": "graduate", "undergrad": "undergraduate"}
+ROLE_STOPWORDS = set("""a an the is are was were be been to of in on at for and or but if with by from as it its
+this that these those i me my we our you your he she they them do does did can could how what when where which
+who whom why will would should there here about into over under than then so not no yes please hi hello
+need want get find know help ask tell call reach talk speak open close free busy right now today available
+around office room hours extension email phone number person someone anyone""".split())
+ROLE_HIGH = 0.75
+
+
+def _role_tokens(phrase: str) -> set[str]:
+    return {ROLE_SYNONYMS.get(w, w) for w in re.findall(r"[a-z]+", phrase.lower())}
+
+
+def _role_candidates(db, text: str) -> list[tuple["Person", float]]:
+    query_tokens = _role_tokens(text) - ROLE_STOPWORDS
+    if not query_tokens:
+        return []
+    # route_topics_here=False people are never surfaced as "the person for this topic" -
+    # their name/alias still resolves normally elsewhere, just not via a role query.
+    people = db.scalars(select(Person).where(Person.active.is_(True), Person.route_topics_here.is_(True))).all()
+    hits = []
+    for p in people:
+        if not p.roles:
+            continue
+        best = 0.0
+        # ';' separates genuinely distinct roles ("grad programs; undergrad programs");
+        # ',' is used WITHIN one role's own description ("PhD program, dissertation forms",
+        # "COPA, careers, resume help, recruiters") and must not be split apart, or a query
+        # whose tokens land in different comma-separated facets of the same role can't reach
+        # a high enough recall against either fragment alone (caught by the "PhD forms" test).
+        for phrase in p.roles.split(";"):
+            role_tokens = _role_tokens(phrase)
+            if not role_tokens:
+                continue
+            recall = len(query_tokens & role_tokens) / len(query_tokens)
+            best = max(best, recall)
+        if best >= ROLE_HIGH:
+            hits.append((p, best))
+    if hits:
+        log.info("directory.resolve role query=%r candidates=%s", text,
+                 [(p.name, round(s, 3)) for p, s in hits])
+    return sorted(hits, key=lambda h: h[1], reverse=True)
+
+
 def _looks_person_ish(text: str) -> bool:
     """Minimal structural signal for now; refined with the common-word gate later."""
     return bool(TITLE_WORD_RE.search(text))
+
+
+def _disambiguate_or_resolve(db, sess, text: str, people: list["Person"]) -> dict:
+    """Shared by name and role matching: a single candidate resolves directly, several
+    close candidates become a "did you mean" prompt. Never picks one silently."""
+    unique = {p.id: p for p in people}
+    if len(unique) > 1:
+        sess.pending_query = text
+        sess.pending_choices = list(unique.keys())
+        choices = [{"id": p.id, "label": f"{p.name} ({p.title})"} for p in unique.values()]
+        names = ", ".join(c["label"] for c in choices)
+        return {"answer": f"Did you mean {names}? Tap one below.", "meta": {"choices": choices}}
+    person = next(iter(unique.values()))
+    sess.last_person_id = person.id
+    return _format_person_answer(person, text, get_show_extensions(db))
 
 
 def _not_found_answer() -> dict:
@@ -255,36 +323,35 @@ def resolve(db, sess, text: str) -> dict | None:
     person question at all, in which case the caller should fall through to the AI/knowledge
     base. Never invents a person: zero credible candidates with a person-ish signal present
     means "couldn't find them, offer a GA" rather than silently falling through."""
-    candidates = _name_candidates(db, text)
-    strong = [c for c in candidates if c[1] >= NAME_HIGH]
-    if not strong:
-        # A pronoun with no new name/role signal refers back to whoever was last resolved
-        # in this session ("is she in?", "what's his extension?"). A re-import can delete-
-        # and-reinsert, so a stale remembered id is forgotten rather than crashing.
-        if PRONOUN_RE.search(text) and sess.last_person_id:
-            person = db.get(Person, sess.last_person_id)
-            if person is not None and person.active:
-                return _format_person_answer(person, text, get_show_extensions(db))
-            sess.last_person_id = None
-        # Weak/no candidates: only treat this as a person question (and refuse to silently
-        # fall through) if the text actually looks person-ish. Otherwise a merely coincidental
-        # weak fuzzy overlap (e.g. a long sentence sharing a few letters with someone's name)
-        # must not hijack an unrelated question into a false "couldn't find them" response.
-        return _not_found_answer() if _looks_person_ish(text) else None
+    # 1. exact/fuzzy name or alias match
+    name_hits = _name_candidates(db, text)
+    strong = [c for c in name_hits if c[1] >= NAME_HIGH]
+    if strong:
+        top_score = strong[0][1]
+        tied = [p for p, score, _ in strong if top_score - score <= TIE_MARGIN]
+        return _disambiguate_or_resolve(db, sess, text, tied)
 
-    top_score = strong[0][1]
-    tied = [c for c in strong if top_score - c[1] <= TIE_MARGIN]
-    unique = {c[0].id: c[0] for c in tied}
-    if len(unique) > 1:
-        sess.pending_query = text
-        sess.pending_choices = list(unique.keys())
-        choices = [{"id": p.id, "label": f"{p.name} ({p.title})"} for p in unique.values()]
-        names = ", ".join(c["label"] for c in choices)
-        return {"answer": f"Did you mean {names}? Tap one below.", "meta": {"choices": choices}}
+    # 2. a pronoun with no new name/role signal refers back to whoever was last resolved
+    # in this session ("is she in?", "what's his extension?"). A re-import can delete-and-
+    # reinsert, so a stale remembered id is forgotten rather than crashing.
+    if PRONOUN_RE.search(text) and sess.last_person_id:
+        person = db.get(Person, sess.last_person_id)
+        if person is not None and person.active:
+            return _format_person_answer(person, text, get_show_extensions(db))
+        sess.last_person_id = None
 
-    person = next(iter(unique.values()))
-    sess.last_person_id = person.id
-    return _format_person_answer(person, text, get_show_extensions(db))
+    # 3. role match ("my grad advisor", "COPA person", "Capstone", "PhD forms", "the Dean")
+    role_hits = _role_candidates(db, text)
+    if role_hits:
+        top_score = role_hits[0][1]
+        tied = [p for p, score in role_hits if top_score - score <= TIE_MARGIN]
+        return _disambiguate_or_resolve(db, sess, text, tied)
+
+    # Nothing credible: only treat this as a person question (and refuse to silently fall
+    # through) if the text actually looks person-ish. Otherwise a merely coincidental weak
+    # fuzzy overlap (e.g. a long sentence sharing a few letters with someone's name) must
+    # not hijack an unrelated question into a false "couldn't find them" response.
+    return _not_found_answer() if _looks_person_ish(text) else None
 
 
 def resolve_choice(db, sess, person_id: int) -> dict:

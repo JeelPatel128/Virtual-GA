@@ -439,6 +439,30 @@ def _format_person_answer(p: "Person", text: str, show_extensions: bool) -> dict
     return {"answer": answer, "meta": meta}
 
 
+def _location_line(p: "Person") -> str:
+    lead = f"{p.name} ({p.title})"
+    if p.building == "Babbio Center" and p.directions:
+        return f"{lead}: Room {p.room}, floor {p.floor}. {p.directions}"
+    if p.building == "Babbio Center":
+        return f"{lead}: Room {p.room} on floor {p.floor} of the Babbio Center."
+    if p.building == "Altorfer":
+        return f"{lead}: Room {p.room} in the Altorfer building."
+    if p.building == "Remote":
+        return f"{lead}: works remotely."
+    return lead
+
+
+def _format_role_group_answer(people: list["Person"]) -> dict:
+    """A role/topic can genuinely belong to several people (e.g. "COPA person" -> two real
+    staff members) - that's not the same kind of ambiguity as two people sharing a name.
+    List everyone with their room/directions in one answer instead of forcing a pick."""
+    answer = "\n".join(_location_line(p) for p in people)
+    meta: dict = {}
+    if any(p.building == "Babbio Center" and p.floor == "4" and p.directions for p in people):
+        meta["images"] = ["/api/directory/floor-map"]
+    return {"answer": answer, "meta": meta}
+
+
 def search_people(db, q: str, limit: int = 10) -> list["Person"]:
     """Plain search for the GA console: no visitor-facing gating (a GA isn't a stranger
     being told about someone - they can see any reasonable match, always with extension
@@ -494,12 +518,19 @@ def resolve(db, sess, text: str) -> dict | None:
             return _format_person_answer(person, text, get_show_extensions(db))
         sess.last_person_id = None
 
-    # 3. role match ("my grad advisor", "COPA person", "Capstone", "PhD forms", "the Dean")
+    # 3. role match ("my grad advisor", "COPA person", "Capstone", "PhD forms", "the Dean").
+    # Several people can genuinely share a role - list them all with their location in one
+    # answer rather than asking "did you mean?", which is reserved for a NAME query (several
+    # people sharing a name, e.g. "Chen") where only one of them is actually who was meant.
     role_hits = _role_candidates(db, text)
     if role_hits:
         top_score = role_hits[0][1]
-        tied = [p for p, score in role_hits if top_score - score <= TIE_MARGIN]
-        return _disambiguate_or_resolve(db, sess, text, tied)
+        tied = {p.id: p for p, score in role_hits if top_score - score <= TIE_MARGIN}
+        if len(tied) > 1:
+            return _format_role_group_answer(list(tied.values()))
+        person = next(iter(tied.values()))
+        sess.last_person_id = person.id
+        return _format_person_answer(person, text, get_show_extensions(db))
 
     # Nothing credible: only treat this as a person question (and refuse to silently fall
     # through) if the text actually looks person-ish. Otherwise a merely coincidental weak

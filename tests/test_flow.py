@@ -132,9 +132,16 @@ DIRECTORY_FIXTURE_CSV = PEOPLE_CSV_HEADER + "\n" + "\n".join([
     f'"{HOURS}",8595,,academic advisor (graduate),yes,yes,2026-01-01,',
     f'Lisa Cavanaugh,Lisa,Cavanaugh,Cavanaugh,Academic Advisor,Staff,Babbio Center,303M,3,,'
     f'"{HOURS}",8596,,academic advisor,yes,yes,2026-01-01,',
-    # COPA / PhD / Dean role-match tests
-    f'Copa Fixture,Copa,Fixture,"Copa Fixture",Careers Coordinator,Staff,Babbio Center,303N,3,,'
+    # COPA / PhD / Dean role-match tests. Names deliberately do NOT contain "copa" anywhere
+    # (name/alias) - only the roles column does - so a "COPA person" query is forced through
+    # the ROLE-matching path, not an accidental name match.
+    f'Priya Shah,Priya,Shah,"Priya Shah",Careers Coordinator,Staff,Babbio Center,303N,3,,'
     f'"{HOURS}",8597,,"COPA, careers, resume help, recruiters",yes,yes,2026-01-01,',
+    # a second person sharing the SAME role, to test the role-group answer (list all, never
+    # "did you mean") - on floor 4 with directions, so the map-attachment logic is exercised
+    f'Marcus Webb,Marcus,Webb,"Marcus Webb",Corporate Outreach Manager,Staff,Babbio Center,'
+    f'401K,4,"Stand at the front desk. 401K is on your right.","{HOURS}",8599,,'
+    f'"COPA, careers, resume help, recruiters",yes,yes,2026-01-01,',
     f'Phd Fixture,Phd,Fixture,"Phd Fixture",PhD Program Coordinator,Staff,Babbio Center,303O,3,,'
     f'"{HOURS}",8598,,"PhD program, dissertation forms",yes,yes,2026-01-01,',
     f'GJ de Vreede,GJ,de Vreede,"Dean de Vreede | GJ | de Vreede | the Dean",Dean,Staff,Babbio Center,'
@@ -323,7 +330,8 @@ def test_role_matching():
         assert "Lisa Cavanaugh" not in last["text"], last
 
         last = _ask_text(c, sid, "COPA person")
-        assert "Copa Fixture" in last["text"], last
+        assert "Priya Shah" in last["text"] and "Marcus Webb" in last["text"], last
+        assert not last["meta"].get("choices"), "a role shared by several people is listed, not asked about"
 
         last = _ask_text(c, sid, "Capstone")
         assert "Christina Alwell" in last["text"], last
@@ -334,6 +342,28 @@ def test_role_matching():
         last = _ask_text(c, sid, "the Dean")
         assert "GJ de Vreede" in last["text"], last
     print("role matching test passed")
+
+
+def test_role_match_lists_everyone_name_match_still_asks():
+    """A role shared by several people is listed, with room and directions, in one answer.
+    A NAME shared by several people (e.g. Chen) still gets "Did you mean?" buttons - these
+    are different kinds of ambiguity and must not be handled the same way."""
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+        sid = c.post("/api/session").json()["session_id"]
+
+        last = _ask_text(c, sid, "COPA person")
+        assert not last["meta"].get("choices"), last
+        text = last["text"]
+        assert "Priya Shah" in text and "Room 303N" in text, text
+        assert "Marcus Webb" in text and "401K" in text, text
+        assert "Stand at the front desk. 401K is on your right." in text, text
+        assert last["meta"].get("images") == ["/api/directory/floor-map"], last
+
+        last = _ask_text(c, sid, "Chen")
+        assert last["meta"].get("choices"), "a shared NAME must still ask, not list"
+        assert "Room" not in last["text"], "a name disambiguation prompt lists options, not locations"
+    print("role-group-vs-name-disambiguation test passed")
 
 
 def test_route_topics_here_excludes_from_role_matching():
@@ -508,7 +538,7 @@ def test_admin_status_reports_directory_counts():
     with TestClient(app) as c:
         _import_directory_fixture(c)
         s = c.get("/api/admin/status", headers=A).json()
-        assert s["people_count"] == 16, s
+        assert s["people_count"] == 17, s
         assert s["rooms_count"] == 6, s
     print("admin status directory counts test passed")
 
@@ -766,6 +796,7 @@ if __name__ == "__main__":
     test_disambiguation_buttons()
     test_remembered_person_pronoun_followup()
     test_role_matching()
+    test_role_match_lists_everyone_name_match_still_asks()
     test_route_topics_here_excludes_from_role_matching()
     test_place_matching()
     test_common_word_gate_faq_regression()

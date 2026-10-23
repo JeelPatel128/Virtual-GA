@@ -122,6 +122,8 @@
     <section id="digest">
       <div class="stats" id="dStats"></div>
       <div class="card" style="margin-top:14px"><h2>Open items by owner</h2><div id="dOwners"></div></div>
+      <div class="card" style="margin-top:14px"><h2>Inventory: low/out of stock</h2><div id="dInventory"></div></div>
+      <div class="card" style="margin-top:14px"><h2>Borrowed items not yet returned</h2><div id="dLends"></div></div>
       <div class="card" style="margin-top:14px"><h2>Questions it couldn't answer today</h2>
         <p class="hint">Add these as Q&amp;As so it can answer next time.</p><div id="dGaps"></div></div>
       <button class="btn ghost" id="sendDigest">Send today's digest to Teams now</button><span class="msgline" id="dMsg"></span>
@@ -298,6 +300,11 @@ async function loadDigest() {
   $("dStats").innerHTML = tiles.map(([k, v]) => `<div class="card"><div class="hint">${k}</div><div class="stat">${esc(v)}</div></div>`).join("");
   const owners = Object.entries(d.open_by_owner);
   $("dOwners").innerHTML = owners.length ? `<ul>${owners.map(([k, v]) => `<li>${esc(k)}: ${v}</li>`).join("")}</ul>` : '<p class="hint">Nothing open right now.</p>';
+  $("dInventory").innerHTML = d.inventory_alerts.length ? `<ul>${d.inventory_alerts.map(a =>
+    `<li>${esc(a.item)} (${esc(a.area)}): ${esc(a.status)}${a.on_order ? " - on order" : ""}</li>`).join("")}</ul>`
+    : '<p class="hint">Everything is stocked.</p>';
+  $("dLends").innerHTML = d.lend_not_returned.length ? `<ul>${d.lend_not_returned.map(x =>
+    `<li>${esc(x.item)} - due ${esc(x.due)}</li>`).join("")}</ul>` : '<p class="hint">Nothing out on loan.</p>';
   $("dGaps").innerHTML = d.unanswered.length ? `<ul>${d.unanswered.map((q, i) => `<li>${esc(q)} <button class="btn small ghost" data-gap="${i}" style="margin:4px 0">Answer this</button></li>`).join("")}</ul>` : '<p class="hint">None today.</p>';
   $("dGaps").querySelectorAll("[data-gap]").forEach(b => b.onclick = () => {
     document.querySelector('nav button[data-tab="kb"]').click(); $("qaQ").value = d.unanswered[+b.dataset.gap]; $("qaA").focus(); });

@@ -492,7 +492,16 @@ def test_inventory_import_matching_borrow_and_ga_search():
         assert t.task["type"] == "Supplies/equipment"
         due_local, created_local = tickets.local(t.due_at), tickets.local(t.created_at)
         assert due_local.hour == 23 and due_local.date() == created_local.date()
-        db.delete(t); db.commit(); db.close()
+        db.close()
+
+        # digest surfaces low/out stock and this borrow as not yet returned
+        dg = c.get("/api/admin/digest", headers=A).json()
+        assert any(a["item"] == "HDMI cables" and a["status"] == "out" and a["on_order"]
+                  for a in dg["inventory_alerts"])
+        assert any("borrowed by" in x["item"] for x in dg["lend_not_returned"])
+
+        db = SessionLocal()
+        db.delete(db.get(Ticket, tid)); db.commit(); db.close()
 
         # can't borrow a "give" item or a ga_only item
         assert c.post(f"/api/session/{sid}/borrow", json={"item_id": "TINV6"}).status_code == 404

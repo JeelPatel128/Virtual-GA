@@ -12,8 +12,8 @@ from sqlalchemy import func, select, update
 
 from . import schedule, storage, teams
 from .config import lead_ga, load_team, settings
-from .db import (ChatSession, Message, QueryLog, ReminderLog, TaskFile, Ticket, get_today_note, kv_get,
-                 kv_set, utcnow)
+from .db import (ChatSession, Item, Message, QueryLog, ReminderLog, TaskFile, Ticket, get_today_note,
+                 kv_get, kv_set, utcnow)
 
 log = logging.getLogger("virtual_ga.tickets")
 TZ = ZoneInfo(settings.TIMEZONE)
@@ -511,6 +511,13 @@ def digest_data(db, day_local: datetime) -> dict:
     overdue = sum(1 for t in open_now if t.next_deadline and t.next_deadline <= utcnow())
     done_today = db.scalar(select(func.count()).select_from(Ticket)
                            .where(Ticket.resolved_at >= start, Ticket.resolved_at < end))
+
+    low_or_out = db.scalars(select(Item).where(Item.active.is_(True), Item.status.in_(("low", "out")))).all()
+    inventory_alerts = [{"item": it.item, "area": it.area, "status": it.status, "on_order": it.on_order}
+                        for it in low_or_out]
+    lend_not_returned = [{"item": t.question,
+                          "due": local(t.due_at).strftime("%a %I:%M %p") if t.due_at else None}
+                         for t in open_now if t.kind == "task" and (t.task or {}).get("type") == "Supplies/equipment"]
     return {
         "date": start_local.strftime("%A, %b %d"),
         "questions": len(q),
@@ -524,6 +531,8 @@ def digest_data(db, day_local: datetime) -> dict:
         "open_by_owner": open_by_owner,
         "overdue": overdue,
         "done_today": done_today,
+        "inventory_alerts": inventory_alerts,
+        "lend_not_returned": lend_not_returned,
     }
 
 
@@ -533,6 +542,9 @@ def send_digest(db, day_local: datetime | None = None) -> dict:
     gap_list = "\n".join(f"- {u}" for u in d["unanswered"][:15]) or "None. Nice."
     answered = "\n".join(f"- {a}" for a in d["answered_samples"]) or "None"
     owner_list = "\n".join(f"- {k}: {v}" for k, v in d["open_by_owner"].items()) or "None"
+    inv_list = "\n".join(f"- {a['item']} ({a['area']}): {a['status']}" + (" - on order" if a["on_order"] else "")
+                        for a in d["inventory_alerts"]) or "None"
+    lend_list = "\n".join(f"- {x['item']} - due {x['due']}" for x in d["lend_not_returned"]) or "None"
     teams.post(teams.build_card(
         title=f"Virtual GA daily digest: {d['date']}",
         mention=[lead] if lead else [],
@@ -547,6 +559,8 @@ def send_digest(db, day_local: datetime | None = None) -> dict:
             ("Avg GA response", f"{d['avg_response_min']} min" if d["avg_response_min"] is not None else "n/a"),
         ],
         body_text=f"**Open items by owner:**\n{owner_list}\n\n"
+                  f"**Low/out of stock:**\n{inv_list}\n\n"
+                  f"**Borrowed items not yet returned:**\n{lend_list}\n\n"
                   f"**Questions the bot couldn't answer (add these to the knowledge base):**\n{gap_list}\n\n"
                   f"**Sample of questions it handled:**\n{answered}",
         buttons=[("Open admin", f"{settings.PUBLIC_BASE_URL}/admin")],

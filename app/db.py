@@ -58,6 +58,15 @@ class Doc(Base):
     handled_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     changes_each_semester: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # GA resources library (migrated onto the existing table). audience="ga_only" or
+    # seasonal=True docs are excluded from every visitor-facing search (see
+    # knowledge.search's visitor flag) - searchable only from the GA console/admin.
+    # Default "public"/False so every pre-existing Doc (manual Q&As, uploads) is
+    # unaffected. linked_faq_ids is reference metadata (which FAQ rows a resource
+    # supports), not used to gate anything.
+    audience: Mapped[str] = mapped_column(String(20), default="public")
+    seasonal: Mapped[bool] = mapped_column(Boolean, default=False)
+    linked_faq_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class Chunk(Base):
@@ -207,6 +216,29 @@ class Room(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class Item(Base):
+    """One row from the SSB inventory CSV, imported (upserted by item_id) from an
+    admin-uploaded CSV, same replace-by-key rules as Person/Room. A visitor is only ever
+    told about audience="visitors" items, and never anything whose area starts with
+    "Josa" (her personal stock) regardless of audience - see app/inventory.py."""
+    __tablename__ = "items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[str] = mapped_column(String(20), index=True, unique=True)
+    item: Mapped[str] = mapped_column(String(300), default="")
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
+    area: Mapped[str] = mapped_column(String(200), default="")
+    spot: Mapped[str] = mapped_column(String(200), default="")
+    quantity: Mapped[str] = mapped_column(String(50), default="")
+    lend_or_give: Mapped[str] = mapped_column(String(20), default="")  # lend | give | internal
+    audience: Mapped[str] = mapped_column(String(20), default="")  # visitors | ga_only
+    status: Mapped[str] = mapped_column(String(20), default="")  # in stock | low | out | unknown
+    on_order: Mapped[bool] = mapped_column(Boolean, default=False)
+    return_within: Mapped[str] = mapped_column(String(50), default="")
+    last_counted: Mapped[str] = mapped_column(String(20), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class EmailCandidate(Base):
     """A proposed email from tools/find_emails.py, awaiting admin approval."""
     __tablename__ = "email_candidates"
@@ -260,6 +292,10 @@ _MIGRATIONS = [
     ("docs", "handled_by", "TEXT"),
     ("docs", "changes_each_semester", "BOOLEAN"),
     ("docs", "status", "TEXT"),
+    # GA resources library
+    ("docs", "audience", "TEXT"),
+    ("docs", "seasonal", "BOOLEAN"),
+    ("docs", "linked_faq_ids", "JSON"),
 ]
 
 

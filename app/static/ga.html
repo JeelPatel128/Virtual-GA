@@ -177,6 +177,26 @@ async function dirSearch() {
   ).join("") : '<p class="hint">No matches.</p>';
 }
 
+async function invSearch() {
+  const q = $("invQ").value.trim();
+  if (!q) { $("invResults").innerHTML = ""; return; }
+  const d = await api(`/api/ga/inventory/search?q=${encodeURIComponent(q)}`);
+  $("invResults").innerHTML = d.results.length ? d.results.map(it => `
+    <div class="q" style="font-size:15px;margin:10px 0 2px">${esc(it.item)} <span class="pill">${esc(it.status)}</span></div>
+    <div class="facts"><span>${esc(it.area)}${it.spot ? " - " + esc(it.spot) : ""}</span><span>Qty: ${esc(it.quantity || "?")}</span>
+    <span>${esc(it.lend_or_give)}${it.on_order ? " - on order" : ""}</span></div>
+    <div class="btns" style="margin-top:6px">
+      <button class="btn small ${it.status === "in stock" ? "" : "quiet"}" data-set="${esc(it.item_id)}" data-status="in stock">In stock</button>
+      <button class="btn small ${it.status === "low" ? "" : "quiet"}" data-set="${esc(it.item_id)}" data-status="low">Low</button>
+      <button class="btn small ${it.status === "out" ? "" : "quiet"}" data-set="${esc(it.item_id)}" data-status="out">Out</button>
+    </div>`
+  ).join("") : '<p class="hint">No matches.</p>';
+  $("invResults").querySelectorAll("[data-set]").forEach(b => b.onclick = async () => {
+    await api(`/api/ga/inventory/${encodeURIComponent(b.dataset.set)}/status`, { method: "POST", body: JSON.stringify({ status: b.dataset.status }) });
+    invSearch();
+  });
+}
+
 async function loadTodayNote() {
   const d = await api("/api/ga/today-note");
   $("todayNote").value = d.text;
@@ -203,8 +223,11 @@ async function listView(force) {
       <span>${esc(t.created_at)} (${t.waiting_minutes} min ago)</span></div>
     </a>`).join("") : '<div class="empty">No open requests. Quiet desk.</div>') +
     `<div class="card"><h3 style="margin:0 0 10px;font-size:15px">Directory</h3>
-    <input id="dirQ" type="search" placeholder="Search a name, alias, or topic..."><div id="dirResults"></div></div>`;
+    <input id="dirQ" type="search" placeholder="Search a name, alias, or topic..."><div id="dirResults"></div></div>` +
+    `<div class="card"><h3 style="margin:0 0 10px;font-size:15px">Inventory</h3>
+    <input id="invQ" type="search" placeholder="Search an item or alias..."><div id="invResults"></div></div>`;
   $("dirQ").oninput = dirSearch;
+  $("invQ").oninput = invSearch;
   loadTodayNote();
   $("noteForm").onsubmit = async (e) => {
     e.preventDefault();

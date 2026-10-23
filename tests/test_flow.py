@@ -427,6 +427,100 @@ def test_today_note_expiry_ga_endpoints_and_ask_shortcircuit():
     print("today-at-SSB note test passed")
 
 
+INVENTORY_FIXTURE_CSV = (
+    "item_id,item,aliases,area,spot,quantity,lend_or_give,audience,status,on_order,return_within,last_counted,notes\n"
+    "TINV1,HDMI cables,HDMI cord | HDMI adapter,Front desk,,0,lend,visitors,out,yes,same day,,not in stock\n"
+    "TINV2,Small calculators,calculators,Front desk drawers,Drawer 3,50,lend,visitors,in stock,no,same day,,\n"
+    "TINV3,Scientific calculator,calculators,Front desk drawers,Drawer 3,5,lend,visitors,in stock,no,same day,,\n"
+    "TINV4,Black toner,,Copy room,Cupboard 3,6,internal,ga_only,in stock,no,,,\n"
+    "TINV5,Blue Books,exam booklets | bluebooks,Josa Balisi office,Cube,412,internal,ga_only,in stock,no,,,Josa's stock\n"
+    "TINV6,Pens,,Front desk,,10,give,visitors,in stock,no,,,\n"
+)
+
+
+def test_inventory_import_matching_borrow_and_ga_search():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        from sqlalchemy import select
+        from app import inventory
+        from app.db import Item as _Item
+
+        r = c.post("/api/admin/inventory/import", headers=A,
+                  files={"file": ("inv.csv", INVENTORY_FIXTURE_CSV.encode(), "text/csv")})
+        assert r.status_code == 200 and r.json()["added"] == 6, r.text
+
+        sid = c.post("/api/session").json()["session_id"]
+
+        # a bare mention never triggers this - only an explicit "do you have" style ask
+        last = _ask_text(c, sid, "I like HDMI cables")
+        assert last["meta"].get("borrow_item_id") is None
+
+        # out of stock, on order
+        last = _ask_text(c, sid, "do you have an HDMI cable")
+        assert last["text"] == "We're out right now. It's on order."
+
+        # in stock + lend -> offers to borrow
+        last = _ask_text(c, sid, "can I borrow a calculator")
+        assert last["text"] == "Yes, ask the GA at the front desk."
+        assert last["meta"]["borrow_item_id"] in ("TINV2", "TINV3")
+
+        # in stock + give -> no borrow button
+        last = _ask_text(c, sid, "do you have pens")
+        assert last["text"] == "Yes, ask the GA at the front desk."
+        assert "borrow_item_id" not in last["meta"]
+
+        # ga_only -> never reveals real stock, offers a GA instead of "we're out"
+        last = _ask_text(c, sid, "do you have toner")
+        assert last["text"] == inventory.NOT_HERE_ANSWER
+        assert last["meta"].get("offer_handoff") is True
+
+        # Josa's stock is excluded from the candidate pool entirely - not even the
+        # generic "I don't see that" non-answer, it falls through like a true non-match
+        last = _ask_text(c, sid, "do you have blue books")
+        assert last["text"] != inventory.NOT_HERE_ANSWER
+
+        # borrowing creates a task ticket due today end of day, with the borrower named
+        teams.sent_cards.clear()
+        r2 = c.post(f"/api/session/{sid}/borrow", json={"item_id": "TINV2"})
+        assert r2.status_code == 200, r2.text
+        tid = r2.json()["ticket_id"]
+        card = teams.sent_cards[-1]
+        assert title(card) == "Task request: Supplies/equipment"
+        assert "borrowed by" in json.dumps(card)
+        db = SessionLocal()
+        t = db.get(Ticket, tid)
+        assert t.task["type"] == "Supplies/equipment"
+        due_local, created_local = tickets.local(t.due_at), tickets.local(t.created_at)
+        assert due_local.hour == 23 and due_local.date() == created_local.date()
+        db.delete(t); db.commit(); db.close()
+
+        # can't borrow a "give" item or a ga_only item
+        assert c.post(f"/api/session/{sid}/borrow", json={"item_id": "TINV6"}).status_code == 404
+        assert c.post(f"/api/session/{sid}/borrow", json={"item_id": "TINV4"}).status_code == 404
+
+        # GA console search sees everything, including Josa's and ga_only stock
+        results = c.get("/api/ga/inventory/search?q=toner", headers=GA).json()["results"]
+        assert any(x["item_id"] == "TINV4" for x in results)
+        results = c.get("/api/ga/inventory/search?q=blue books", headers=GA).json()["results"]
+        assert any(x["item_id"] == "TINV5" for x in results)
+
+        # one-tap status button sets last_counted to today
+        r3 = c.post("/api/ga/inventory/TINV1/status", headers=GA, json={"status": "in stock"})
+        assert r3.status_code == 200
+        today = datetime.now(tickets.TZ).strftime("%Y-%m-%d")
+        assert r3.json()["last_counted"] == today
+        assert c.post("/api/ga/inventory/TINV1/status", headers=GA, json={"status": "bogus"}).status_code == 400
+        assert c.post("/api/ga/inventory/TINV1/status", json={"status": "out"}).status_code == 401
+
+        db = SessionLocal()
+        for item_id in ("TINV1", "TINV2", "TINV3", "TINV4", "TINV5", "TINV6"):
+            row = db.scalar(select(_Item).where(_Item.item_id == item_id))
+            if row:
+                db.delete(row)
+        db.commit(); db.close()
+    print("inventory test passed")
+
+
 def test_storage_module_degrades_and_builds_correct_requests():
     """app/storage.py: offline tests only, no real network calls. Mocks requests.* to
     check it builds the right calls, and confirms it degrades gracefully (returns None /
@@ -1581,6 +1675,7 @@ if __name__ == "__main__":
     test_shift_end_headsup_and_conditional_reassignment()
     test_shift_start_first_tick_sends_nothing_then_detects_new_shift()
     test_today_note_expiry_ga_endpoints_and_ask_shortcircuit()
+    test_inventory_import_matching_borrow_and_ga_search()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

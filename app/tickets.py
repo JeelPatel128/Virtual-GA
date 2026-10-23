@@ -251,6 +251,12 @@ def _snooze_deadline(choice: str, ga_name: str) -> datetime:
     raise ValueError(f"Unknown snooze option {choice!r}")
 
 
+def end_of_today() -> datetime:
+    """A borrowed item's return deadline - today, end of day, local time."""
+    end_local = datetime.now(TZ).replace(hour=23, minute=59, second=0, microsecond=0)
+    return _to_naive_utc(end_local)
+
+
 def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = None, text: str | None = None,
              snooze_until: str | None = None, reason: str | None = None) -> None:
     """Taking any action implies ownership: an unclaimed ticket is auto-claimed to

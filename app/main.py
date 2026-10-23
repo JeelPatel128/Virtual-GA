@@ -15,10 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from . import directory, knowledge, llm, schedule, storage, teams, tickets
+from . import directory, inventory, knowledge, llm, schedule, storage, teams, tickets
 from .config import BASE_DIR, load_team, settings
-from .db import (ChatSession, Doc, Message, Person, QueryLog, SessionLocal, TaskFile, Ticket, get_today_note,
-                 init_db, set_today_note, utcnow)
+from .db import (ChatSession, Doc, Item, Message, Person, QueryLog, SessionLocal, TaskFile, Ticket,
+                 get_today_note, init_db, set_today_note, utcnow)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("virtual_ga")
@@ -218,6 +218,13 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
         db.commit()
         return {"relayed": False}
 
+    inv = inventory.visitor_answer(db, text)
+    if inv is not None:
+        tickets.say(db, sid, "bot", inv["answer"], meta=inv["meta"])
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True))
+        db.commit()
+        return {"relayed": False}
+
     hour_ago = utcnow() - timedelta(hours=1)
     asked = db.scalar(select(func.count()).select_from(QueryLog)
                       .where(QueryLog.session_id == sid, QueryLog.created_at >= hour_ago))
@@ -360,6 +367,25 @@ async def create_task(sid: str, name: str = Form(...), email: str = Form(""), ty
     return {"ticket_id": t.id}
 
 
+class BorrowIn(BaseModel):
+    item_id: str
+
+
+@app.post("/api/session/{sid}/borrow")
+def borrow_item(sid: str, body: BorrowIn, db=Depends(get_db)):
+    sess = _session(db, sid)
+    if tickets.open_ticket_for(db, sid):
+        raise HTTPException(409, "A GA has already been notified")
+    item = db.scalar(select(Item).where(Item.item_id == body.item_id, Item.active.is_(True)))
+    if not item or item.audience != "visitors" or item.lend_or_give != "lend":
+        raise HTTPException(404, "That item isn't available to borrow.")
+    name = sess.visitor_name or "Visitor"
+    t = tickets.create_task_ticket(db, sess, name, None, "Supplies/equipment",
+                                   f"Borrow: {item.item} (borrowed by {name})", 1, tickets.end_of_today(),
+                                   "Front desk")
+    return {"ticket_id": t.id}
+
+
 @app.post("/api/session/{sid}/contact")
 def add_contact(sid: str, body: ContactIn, db=Depends(get_db)):
     sess = _session(db, sid)
@@ -454,6 +480,35 @@ def ga_directory_search(q: str, db=Depends(get_db)):
     return {"results": [{"id": p.id, "name": p.name, "title": p.title, "building": p.building,
                          "room": p.room, "floor": p.floor, "extension": p.extension,
                          "email": p.email, "office_hours": p.office_hours} for p in results]}
+
+
+def _item_json(it: Item) -> dict:
+    return {"item_id": it.item_id, "item": it.item, "aliases": it.aliases, "area": it.area,
+            "spot": it.spot, "quantity": it.quantity, "lend_or_give": it.lend_or_give,
+            "audience": it.audience, "status": it.status, "on_order": it.on_order,
+            "return_within": it.return_within, "last_counted": it.last_counted, "notes": it.notes}
+
+
+@app.get("/api/ga/inventory/search", dependencies=[Depends(require_ga)])
+def ga_inventory_search(q: str, db=Depends(get_db)):
+    return {"results": [_item_json(it) for it in inventory.search_items(db, q)]}
+
+
+class InventoryStatusIn(BaseModel):
+    status: str
+
+
+@app.post("/api/ga/inventory/{item_id}/status", dependencies=[Depends(require_ga)])
+def ga_inventory_set_status(item_id: str, body: InventoryStatusIn, db=Depends(get_db)):
+    if body.status not in inventory.STATUS_CHOICES:
+        raise HTTPException(400, f"Status must be one of {', '.join(inventory.STATUS_CHOICES)}")
+    item = db.scalar(select(Item).where(Item.item_id == item_id, Item.active.is_(True)))
+    if not item:
+        raise HTTPException(404)
+    item.status = body.status
+    item.last_counted = datetime.now(tickets.TZ).strftime("%Y-%m-%d")
+    db.commit()
+    return _item_json(item)
 
 
 @app.get("/api/ga/tickets", dependencies=[Depends(require_ga)])
@@ -734,6 +789,12 @@ async def import_directory(file: UploadFile = File(...), db=Depends(get_db)):
 async def import_rooms(file: UploadFile = File(...), db=Depends(get_db)):
     text = (await file.read()).decode("utf-8", errors="replace")
     return directory.import_rooms_csv(db, text)
+
+
+@app.post("/api/admin/inventory/import", dependencies=[Depends(require_admin)])
+async def import_inventory(file: UploadFile = File(...), db=Depends(get_db)):
+    text = (await file.read()).decode("utf-8", errors="replace")
+    return inventory.import_inventory_csv(db, text)
 
 
 @app.post("/api/admin/emails/import", dependencies=[Depends(require_admin)])

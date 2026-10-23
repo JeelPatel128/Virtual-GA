@@ -530,6 +530,78 @@ def test_inventory_import_matching_borrow_and_ga_search():
     print("inventory test passed")
 
 
+RESOURCES_FIXTURE_CSV = (
+    "resource_id,title,source_file,audience,faq_ids,summary,seasonal,notes\n"
+    "TRES1,Test public guide,nonexistent/public-guide.pdf,public,\"R3, R4\","
+    "This is a public summary about zebra giraffe widgets.,no,\n"
+    "TRES2,Test ga-only guide,nonexistent/ga-guide.pdf,ga_only,,"
+    "This is a secret ga-only summary about unicorn narwhal gadgets.,no,\n"
+    "TRES3,Test seasonal guide,nonexistent/seasonal.pdf,public,,"
+    "This is a seasonal summary about penguin walrus devices.,yes,\n"
+)
+
+
+def test_ga_resources_import_and_audience_gating():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        from sqlalchemy import select
+        from app import knowledge
+        from app.db import Doc as _Doc
+
+        bad = b"resource_id,title\nTRES1,x\n"
+        r = c.post("/api/admin/resources/import", headers=A, files={"file": ("res.csv", bad, "text/csv")})
+        assert r.status_code == 200
+        assert "source_file" in r.json()["missing_columns"]
+        assert r.json()["imported"] == 0
+
+        r = c.post("/api/admin/resources/import", headers=A,
+                  files={"file": ("res.csv", RESOURCES_FIXTURE_CSV.encode(), "text/csv")})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"missing_columns": [], "imported": 3, "errors": []}
+
+        db = SessionLocal()
+        pub = db.scalars(select(_Doc).where(_Doc.external_id == "TRES1")).first()
+        assert pub.audience == "public" and pub.linked_faq_ids == ["R3", "R4"]
+        ga_only = db.scalars(select(_Doc).where(_Doc.external_id == "TRES2")).first()
+        assert ga_only.audience == "ga_only"
+        seasonal = db.scalars(select(_Doc).where(_Doc.external_id == "TRES3")).first()
+        assert seasonal.seasonal is True
+        db.close()
+
+        # a public resource (even with no real file yet - just its CSV summary) is
+        # searchable by visitors
+        hits = knowledge.search(SessionLocal(), "zebra giraffe widgets")
+        assert any(h["title"] == "Test public guide" for h in hits)
+
+        # a ga_only resource never appears in a visitor-facing search...
+        hits = knowledge.search(SessionLocal(), "unicorn narwhal gadgets")
+        assert not any(h["title"] == "Test ga-only guide" for h in hits)
+        # ...but is searchable from the GA console / admin (visitor=False)
+        hits = knowledge.search(SessionLocal(), "unicorn narwhal gadgets", visitor=False)
+        assert any(h["title"] == "Test ga-only guide" for h in hits)
+        assert any(x["title"] == "Test ga-only guide"
+                  for x in c.get("/api/ga/resources/search?q=unicorn narwhal", headers=GA).json()["results"])
+
+        # a seasonal resource is excluded from visitor answers too, but not from the GA console
+        hits = knowledge.search(SessionLocal(), "penguin walrus devices")
+        assert not any(h["title"] == "Test seasonal guide" for h in hits)
+        hits = knowledge.search(SessionLocal(), "penguin walrus devices", visitor=False)
+        assert any(h["title"] == "Test seasonal guide" for h in hits)
+
+        # a visitor's actual question never surfaces ga_only/seasonal content either
+        sid = c.post("/api/session").json()["session_id"]
+        last = _ask_text(c, sid, "unicorn narwhal gadgets?")
+        assert "unicorn" not in last["text"].lower() and "secret ga-only" not in last["text"].lower()
+
+        for ext_id in ("TRES1", "TRES2", "TRES3"):
+            db = SessionLocal()
+            d = db.scalars(select(_Doc).where(_Doc.external_id == ext_id)).first()
+            db.close()
+            if d:
+                c.delete(f"/api/admin/docs/{d.id}", headers=A)
+    print("GA resources import + audience gating test passed")
+
+
 def test_storage_module_degrades_and_builds_correct_requests():
     """app/storage.py: offline tests only, no real network calls. Mocks requests.* to
     check it builds the right calls, and confirms it degrades gracefully (returns None /
@@ -1685,6 +1757,7 @@ if __name__ == "__main__":
     test_shift_start_first_tick_sends_nothing_then_detects_new_shift()
     test_today_note_expiry_ga_endpoints_and_ask_shortcircuit()
     test_inventory_import_matching_borrow_and_ga_search()
+    test_ga_resources_import_and_audience_gating()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

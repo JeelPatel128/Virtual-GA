@@ -9,6 +9,7 @@ import numpy as np
 from sqlalchemy import delete, select
 
 from . import llm
+from .config import BASE_DIR
 from .db import Chunk, Doc
 
 CHUNK_CHARS = 900
@@ -190,6 +191,80 @@ def import_faq_csv(db, text: str, added_by: str | None = None) -> dict:
     return {"missing_columns": [], "imported": imported, "skipped": skipped, "errors": errors}
 
 
+# ---------- GA resources library (data/ga_resources.csv) ----------
+
+RESOURCES_CSV_COLUMNS = ["resource_id", "title", "source_file", "audience", "faq_ids",
+                         "summary", "seasonal", "notes"]
+RESOURCES_DIR = BASE_DIR / "data" / "resources"
+
+
+def parse_resources_csv(text: str) -> dict:
+    reader = csv.DictReader(io.StringIO(text))
+    header = reader.fieldnames or []
+    missing = [c for c in RESOURCES_CSV_COLUMNS if c not in header]
+    if missing:
+        return {"missing_columns": missing, "rows": []}
+    rows = []
+    for raw in reader:
+        get = lambda k: (raw.get(k) or "").strip()
+        rows.append({
+            "resource_id": get("resource_id"), "title": get("title"), "source_file": get("source_file"),
+            "audience": get("audience") or "public",
+            "faq_ids": [f.strip() for f in get("faq_ids").split(",") if f.strip()],
+            "summary": get("summary"), "seasonal": get("seasonal").lower() == "yes",
+        })
+    return {"missing_columns": [], "rows": rows}
+
+
+def _resource_text(source_file: str, summary: str) -> tuple[str, str]:
+    """(kind, text) - the file's own extracted text if it's been placed under
+    data/resources/, falling back to just the CSV's summary otherwise (e.g. before the
+    real files exist yet). Resource PDFs are committed to the repo, unlike the gitignored
+    directory/inventory CSVs, so reading them here (admin-triggered import, not a live
+    visitor request) doesn't cross the "never read data/ at request time" line."""
+    path = RESOURCES_DIR / source_file
+    if path.is_file():
+        try:
+            kind, text = extract_text(path.name, path.read_bytes(), "application/octet-stream")
+            return kind, (f"{summary}\n\n{text}" if summary else text).strip()
+        except ValueError:
+            pass
+    return "text", summary.strip()
+
+
+def upsert_resource_doc(db, row: dict) -> Doc:
+    kind, text = _resource_text(row["source_file"], row["summary"])
+    if not text:
+        raise ValueError(f"no summary, and no file found at data/resources/{row['source_file']}")
+    doc = db.scalars(select(Doc).where(Doc.external_id == row["resource_id"])).first()
+    if doc is None:
+        doc = Doc(external_id=row["resource_id"])
+        db.add(doc)
+    doc.title, doc.kind, doc.extracted_text = row["title"][:300], kind, text
+    doc.audience, doc.seasonal, doc.linked_faq_ids = row["audience"], row["seasonal"], row["faq_ids"]
+    db.flush()
+    replace_chunks(db, doc, text)
+    db.commit()
+    return doc
+
+
+def import_resources_csv(db, text: str) -> dict:
+    parsed = parse_resources_csv(text)
+    if parsed["missing_columns"]:
+        return {"missing_columns": parsed["missing_columns"], "imported": 0, "errors": []}
+    imported = 0
+    errors = []
+    for row in parsed["rows"]:
+        if not row["resource_id"] or not row["title"]:
+            continue
+        try:
+            upsert_resource_doc(db, row)
+            imported += 1
+        except Exception as e:
+            errors.append(f"{row['resource_id']}: {e}")
+    return {"missing_columns": [], "imported": imported, "errors": errors}
+
+
 def reembed_missing(db) -> int:
     """Embed chunks that were added before the Gemini key existed."""
     rows = db.execute(select(Chunk, Doc.title).join(Doc).where(Chunk.embedding.is_(None))).all()
@@ -210,8 +285,14 @@ def _tokens(s: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in STOPWORDS and len(w) > 1]
 
 
-def search(db, query: str, k: int = 5) -> list[dict]:
+def search(db, query: str, k: int = 5, visitor: bool = True) -> list[dict]:
+    """visitor=True (the default, used by the bot) excludes any Doc marked audience
+    "ga_only" or seasonal=True - a GA-resources-library doc the visitor bot must never
+    see. The admin "Test what it finds" tool and the GA console's own resource search
+    both pass visitor=False to see everything."""
     rows = db.execute(select(Chunk, Doc).join(Doc)).all()
+    if visitor:
+        rows = [(c, d) for c, d in rows if d.audience != "ga_only" and not d.seasonal]
     if not rows:
         return []
     results = []

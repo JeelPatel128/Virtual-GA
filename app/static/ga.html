@@ -197,6 +197,16 @@ async function invSearch() {
   });
 }
 
+async function resSearch() {
+  const q = $("resQ").value.trim();
+  if (!q) { $("resResults").innerHTML = ""; return; }
+  const d = await api(`/api/ga/resources/search?q=${encodeURIComponent(q)}`);
+  $("resResults").innerHTML = d.results.length ? d.results.map(h => `
+    <div class="q" style="font-size:15px;margin:10px 0 2px">${esc(h.title)} <span class="hint">score ${h.score}</span></div>
+    <div class="p" style="font-size:13px;color:var(--muted)">${esc(h.text.slice(0, 200))}</div>`
+  ).join("") : '<p class="hint">No matches.</p>';
+}
+
 async function loadTodayNote() {
   const d = await api("/api/ga/today-note");
   $("todayNote").value = d.text;
@@ -225,9 +235,13 @@ async function listView(force) {
     `<div class="card"><h3 style="margin:0 0 10px;font-size:15px">Directory</h3>
     <input id="dirQ" type="search" placeholder="Search a name, alias, or topic..."><div id="dirResults"></div></div>` +
     `<div class="card"><h3 style="margin:0 0 10px;font-size:15px">Inventory</h3>
-    <input id="invQ" type="search" placeholder="Search an item or alias..."><div id="invResults"></div></div>`;
+    <input id="invQ" type="search" placeholder="Search an item or alias..."><div id="invResults"></div></div>` +
+    `<div class="card"><h3 style="margin:0 0 10px;font-size:15px">Resources</h3>
+    <p class="hint">Guides, flyers and forms, including GA-only ones never shown to visitors.</p>
+    <input id="resQ" type="search" placeholder="Search a guide, flyer or form..."><div id="resResults"></div></div>`;
   $("dirQ").oninput = dirSearch;
   $("invQ").oninput = invSearch;
+  $("resQ").oninput = resSearch;
   loadTodayNote();
   $("noteForm").onsubmit = async (e) => {
     e.preventDefault();

@@ -494,6 +494,13 @@ def ga_inventory_search(q: str, db=Depends(get_db)):
     return {"results": [_item_json(it) for it in inventory.search_items(db, q)]}
 
 
+@app.get("/api/ga/resources/search", dependencies=[Depends(require_ga)])
+def ga_resources_search(q: str, db=Depends(get_db)):
+    hits = knowledge.search(db, q, k=10, visitor=False)
+    return {"results": [{"title": h["title"], "kind": h["kind"], "text": h["text"], "score": h["score"]}
+                        for h in hits]}
+
+
 class InventoryStatusIn(BaseModel):
     status: str
 
@@ -771,7 +778,7 @@ def dismiss_job(job_id: str):
 
 @app.get("/api/admin/search", dependencies=[Depends(require_admin)])
 def admin_search(q: str, db=Depends(get_db)):
-    return {"hits": knowledge.search(db, q, k=5)}
+    return {"hits": knowledge.search(db, q, k=5, visitor=False)}
 
 
 @app.post("/api/admin/reembed", dependencies=[Depends(require_admin)])
@@ -795,6 +802,12 @@ async def import_rooms(file: UploadFile = File(...), db=Depends(get_db)):
 async def import_inventory(file: UploadFile = File(...), db=Depends(get_db)):
     text = (await file.read()).decode("utf-8", errors="replace")
     return inventory.import_inventory_csv(db, text)
+
+
+@app.post("/api/admin/resources/import", dependencies=[Depends(require_admin)])
+async def import_resources(file: UploadFile = File(...), db=Depends(get_db)):
+    text = (await file.read()).decode("utf-8", errors="replace")
+    return knowledge.import_resources_csv(db, text)
 
 
 @app.post("/api/admin/emails/import", dependencies=[Depends(require_admin)])

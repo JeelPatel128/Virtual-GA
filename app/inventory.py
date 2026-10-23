@@ -81,23 +81,27 @@ def _tokens(s: str) -> set[str]:
     return {_stem(w) for w in re.findall(r"[a-z0-9]+", s.lower())}
 
 
-def _matches(query_tail: str, it: Item) -> bool:
-    """Any shared significant (3+ letter) word between the item/alias name and the
-    query is enough - an item name's own descriptive words ("Small", "Heavy Duty")
-    don't all need to show up in a casual question."""
+def _best_overlap(query_tail: str, it: Item) -> int:
+    """Highest word-overlap score between the query and any one of the item's
+    name/aliases - 0 means no match at all."""
     qt = _tokens(query_tail)
+    best = 0
     for name in [it.item, *(it.aliases or [])]:
         if not name:
             continue
         nt = {t for t in _tokens(name) if len(t) >= 3}
-        if nt & qt:
-            return True
-    return False
+        if nt:
+            best = max(best, len(nt & qt))
+    return best
 
 
 def find_items(db, query: str, include_josa: bool = False) -> list[Item]:
     """Only runs for an explicit "do you have/can I borrow/is there" style question -
-    a bare mention of an item name elsewhere in a sentence never triggers this."""
+    a bare mention of an item name elsewhere in a sentence never triggers this. Returns
+    only the item(s) tied for the *highest* word overlap, not everything with any
+    overlap at all - a real inventory has many similarly-themed items (several kinds of
+    cable, several kinds of charger), and matching on any single shared word cross-
+    matches the wrong one (e.g. "an HDMI cable" pulling in "Power cables")."""
     m = INTENT_RE.search(query)
     if not m:
         return []
@@ -105,7 +109,11 @@ def find_items(db, query: str, include_josa: bool = False) -> list[Item]:
     items = db.scalars(select(Item).where(Item.active.is_(True))).all()
     if not include_josa:
         items = [it for it in items if not it.area.lower().startswith("josa")]
-    return [it for it in items if _matches(tail, it)]
+    scored = [(score, it) for it in items if (score := _best_overlap(tail, it))]
+    if not scored:
+        return []
+    top = max(score for score, _ in scored)
+    return [it for score, it in scored if score == top]
 
 
 def search_items(db, q: str, limit: int = 20) -> list[Item]:

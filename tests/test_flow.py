@@ -435,6 +435,7 @@ INVENTORY_FIXTURE_CSV = (
     "TINV4,Black toner,,Copy room,Cupboard 3,6,internal,ga_only,in stock,no,,,\n"
     "TINV5,Blue Books,exam booklets | bluebooks,Josa Balisi office,Cube,412,internal,ga_only,in stock,no,,,Josa's stock\n"
     "TINV6,Pens,,Front desk,,10,give,visitors,in stock,no,,,\n"
+    "TINV7,Power cables,,Hanlon Lab,Drawer 6,2,lend,visitors,in stock,no,same day,,\n"
 )
 
 
@@ -447,7 +448,7 @@ def test_inventory_import_matching_borrow_and_ga_search():
 
         r = c.post("/api/admin/inventory/import", headers=A,
                   files={"file": ("inv.csv", INVENTORY_FIXTURE_CSV.encode(), "text/csv")})
-        assert r.status_code == 200 and r.json()["added"] == 6, r.text
+        assert r.status_code == 200 and r.json()["added"] == 7, r.text
 
         sid = c.post("/api/session").json()["session_id"]
 
@@ -455,7 +456,9 @@ def test_inventory_import_matching_borrow_and_ga_search():
         last = _ask_text(c, sid, "I like HDMI cables")
         assert last["meta"].get("borrow_item_id") is None
 
-        # out of stock, on order
+        # out of stock, on order - and NOT cross-matched with the unrelated in-stock
+        # "Power cables" just because both names contain the word "cable" (a real bug
+        # found when checking this against the actual ssb_inventory.csv data)
         last = _ask_text(c, sid, "do you have an HDMI cable")
         assert last["text"] == "We're out right now. It's on order."
 
@@ -522,7 +525,7 @@ def test_inventory_import_matching_borrow_and_ga_search():
         assert c.post("/api/ga/inventory/TINV1/status", json={"status": "out"}).status_code == 401
 
         db = SessionLocal()
-        for item_id in ("TINV1", "TINV2", "TINV3", "TINV4", "TINV5", "TINV6"):
+        for item_id in ("TINV1", "TINV2", "TINV3", "TINV4", "TINV5", "TINV6", "TINV7"):
             row = db.scalar(select(_Item).where(_Item.item_id == item_id))
             if row:
                 db.delete(row)

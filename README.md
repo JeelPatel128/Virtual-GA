@@ -6,6 +6,7 @@ A QR-code chat assistant for the front desk. It answers common questions from a 
 
 **For visitors** (scan the QR code, nothing to install)
 - Ask questions and get answers drawn only from your knowledge base. It says "not sure" instead of guessing.
+- Ask "do you have a calculator?" or "can I borrow an HDMI cable?" and get a straight answer from the real front-desk inventory - with a one-tap **Borrow it** button for anything lendable.
 - Tap **Get a GA** to leave their name, their question and, optionally, a phone number (with consent).
 - Tap **Request something from the GAs** for a print job, room setup, delivery or anything else that isn't a question - with an optional file attachment, a due date, and a copy count.
 - See live updates: "on the way, about 5 minutes", "tied up, will call you back", and direct replies from the GA. Once a task is marked done, a signed link lets the requester say whether it was actually taken care of.
@@ -14,11 +15,12 @@ A QR-code chat assistant for the front desk. It answers common questions from a 
 - A Teams card in the team channel @mentions whoever is on shift, according to the Google Calendar.
 - One tap opens the GA console, with **Claim** (so exactly one GA owns an item - a second claim attempt is rejected), **On my way (2/5/10 min)**, a structured **Busy, follow up in...** picker (30 min / 2 h / end of shift / tomorrow 10 AM, with a required reason), **Reply**, and **Mark resolved**.
 - The console's **Today at SSB** field is where you note anything happening today (an event, a closure) that visitors might ask about - it clears itself at midnight.
+- The console also has **Inventory** search (every item, including Josa's personal stock and GA-only supplies, with one-tap in stock/low/out buttons) and **Resources** search (every guide, flyer and form, including ones never shown to a visitor).
 
 **For you, the lead**
 - No GA work ever falls back to the office manager: every open item (a visitor handoff, a message for someone specific, or a task request) has a single owner and a deadline, and a forgotten one keeps getting reminded about - first the owner, then more urgently, then you, then the whole team - until it's done or reassigned. The exact same reminder chain also runs when nobody has claimed an item yet, targeting whoever is actually on shift at that moment.
 - A GA's open items are never silently dropped: ending a shift hands off anything that can't wait for their next shift, and a new shift starting gets a card listing what's open.
-- A **daily digest** posts at 5 PM: question counts, how many the bot answered, handoffs, overdue items, items closed that day, and the list of questions it couldn't answer. A **weekly report** posts Monday mornings: missed deadlines, snoozes, reassignments and average time-to-done, per GA.
+- A **daily digest** posts at 5 PM: question counts, how many the bot answered, handoffs, overdue items, items closed that day, low/out of stock supplies, borrowed items not yet returned, and the list of questions it couldn't answer. A **weekly report** posts Monday mornings: missed deadlines, snoozes, reassignments and average time-to-done, per GA.
 - The admin page (`/admin`) lets you add Q&As (one at a time or in bulk via CSV), upload PDFs, Word files, images and videos, check the schedule, see today's and this week's numbers, and print the QR code.
 
 ## How it's built (all free tiers)
@@ -197,6 +199,37 @@ items. At the actual end of shift, an item is only reassigned if its deadline fa
 the owner's own next shift - if they'll be back in time, it stays with them. A newly
 started shift gets a card showing what's currently open.
 
+## Inventory and GA resources
+
+**Inventory** (`data/ssb_inventory.csv`, gitignored, loaded through the admin **Directory**
+tab's inventory import, same upsert-by-key/replace rules as the people and rooms CSVs -
+by `item_id`, blank cells never erase an edit, a row missing from a new upload is hidden,
+not deleted) answers "do you have a calculator?" or "can I borrow an HDMI cable?" directly,
+without the AI. It only fires on an explicit ask ("do you have...", "is there...", "can I
+borrow/get..."), never on a bare mention, and matches on the item's name and its `aliases`
+column (pipe-separated). When several items tie for the best match (e.g. several kinds of
+toner for a generic "do you have toner?"), all of them are considered together, so the
+answer still reflects reality even though the visitor didn't name the specific one.
+
+A visitor only ever hears about `audience=visitors` items, and never anything whose `area`
+starts with "Josa" (her personal stock) - that's excluded before matching even runs, not
+just hidden after. A `ga_only` item is answered as if it isn't stocked at all, so a visitor
+can't tell "really out" apart from "GA-only and we won't say." An item marked `lend_or_give
+= lend` and currently in stock gets a one-tap **Borrow it** button, which creates a normal
+task ticket due today end of day - it goes through the exact same reminder ladder as
+everything else, so an unreturned loan can't be forgotten, and the GA console's Inventory
+tab has one-tap in stock/low/out buttons to keep status current.
+
+**GA resources** (`data/ga_resources.csv`, gitignored metadata + PDFs under
+`data/resources/`, which *are* committed since they're ordinary app content, not private
+data) are indexed into the same knowledge base as every other Q&A and upload - a resource
+is just a `Doc` with `audience` (`public` or `ga_only`) and `seasonal` set. A `ga_only` or
+`seasonal` resource is excluded from every visitor-facing search; the admin **Test what it
+finds** tool and the GA console's own Resources search both see everything. Importing a
+resource whose PDF hasn't been placed under `data/resources/` yet falls back to just the
+CSV's own `summary` column, so the library is fully usable before the real files exist -
+re-importing later upgrades it automatically once they're added.
+
 ## Running locally
 
 ```bash
@@ -223,14 +256,16 @@ python tests/test_flow.py
 - The bot is instructed never to discuss grades, IDs, or financial or medical details, and to hand those requests to a human.
 - Visitors are limited to 30 bot questions per hour, which protects the free Gemini quota.
 - Every reminder, escalation and report stays inside `team.json` - the SSB staff directory is never used for alerts.
+- Josa's personal inventory and anything marked GA-only (stock or a resource) is never shown to a visitor, in any form.
 - Get approval from your manager before putting the QR code on the desk, since the bot speaks on behalf of SSB.
 
 ## Project layout
 ```
 app/main.py         routes: visitor chat, GA console, admin, requester status page, cron tick
 app/tickets.py      claim, status model, reminder ladder, shift handoff, confirmation, digest, weekly report
-app/knowledge.py    file reading, chunking, embeddings, search, FAQ bulk import
+app/knowledge.py    file reading, chunking, embeddings, search, FAQ bulk import, GA resources
 app/directory.py    person/place resolver: name, fuzzy, role matching; CSV upsert import
+app/inventory.py    front-desk inventory: CSV upsert import, "do you have X" matching, borrowing
 app/storage.py      task-file attachments: Supabase Storage, with a local DB table fallback
 app/llm.py          Gemini: answers, embeddings, image and video reading
 app/schedule.py     Google Calendar shifts

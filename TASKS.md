@@ -98,6 +98,31 @@ pilot results — not merged to `main` yet.
   `SUPABASE_URL`/`SUPABASE_SERVICE_KEY` are set, else a local DB table — same
   degrade-gracefully pattern as Gemini without a key.
 
+## Inventory and GA resources (2026-10-23 spec, built 2026-10-23, `reliability-pack-2`)
+
+Not merged to `main`. Two features, both reusing existing machinery rather than building
+parallel systems: inventory piggybacks on the task-ticket/reminder-ladder pack above, and
+GA resources are just `Doc` rows in the existing knowledge base.
+
+| # | Item | Status |
+|---|---|---|
+| 1 | `Item` table + admin CSV import (upsert by `item_id`, same rules as the directory) | ✅ Done, verified against Supabase (264 real rows imported) |
+| 2 | Visitor "do you have X" matching: in stock/low → offer; out → "we're out" + on order; ga_only → answered as not stocked; Josa's area excluded entirely | ✅ Done. Checking against the real 264-row `ssb_inventory.csv` (not just the test fixture) caught a real cross-match bug — "an HDMI cable" was matching the unrelated, in-stock "Power cables" since both just share the word "cable." Fixed by scoring every candidate by word overlap and keeping only the top-scoring tie, not anything with any overlap at all. |
+| 3 | Overdue loans use the existing reminder ladder | ✅ Done - "Borrow it" creates a normal task ticket (due today end of day, borrower named in its text), no new escalation mechanism needed |
+| 4 | GA console: inventory search (everything, incl. Josa's/ga_only) + one-tap in stock/low/out buttons | ✅ Done |
+| 5 | Daily digest: low/out stock, borrowed items not yet returned | ✅ Done |
+| 6 | GA resources: index each PDF (or its CSV `summary` as a fallback, before the real files exist) into the knowledge base, tagged `audience`/`seasonal`/`linked_faq_ids` | ✅ Done, verified against Supabase (9 real rows imported, summary-only - the actual PDFs haven't been placed under `data/resources/` yet) |
+| 7 | `audience=ga_only`/`seasonal=yes` resources excluded from every visitor search; searchable from the GA console/admin only | ✅ Done - `knowledge.search()`'s new `visitor` flag |
+
+**FAQ re-import**: the real `virtual-ga-faq.csv` (50 rows) was imported against the real
+Supabase DB — 12 imported, 38 skipped as "Needs answer", matching Jeel's expected split
+exactly.
+
+**Still needed from Jeel:** the actual 5 PDFs under `data/resources/` (committed to the
+repo, not gitignored) — until then, each resource's bot/GA-visible content is just its
+CSV `summary` line. Re-running the resources import after they're added picks up the
+real extracted text automatically.
+
 ## Sustainability pack (2026-10-22, spec from outside this repo — pending)
 
 JP's spec not pasted yet. Named scope so far: admin-managed settings, health checks, content

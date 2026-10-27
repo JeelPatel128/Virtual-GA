@@ -75,7 +75,14 @@ function loginView(msg) {
   app.innerHTML = `<form class="card" id="login"><h2 style="margin-top:0">GA console</h2>
     <label for="k">Team key</label><input id="k" type="password" autocomplete="current-password">
     <div class="err">${esc(msg || "")}</div><button class="btn" style="margin-top:10px">Open</button></form>`;
-  $("login").onsubmit = (e) => { e.preventDefault(); key = $("k").value; try { sessionStorage.setItem("ga_key", key); } catch (er) {} loadTeam().then(() => render(true)); };
+  $("login").onsubmit = async (e) => {
+    e.preventDefault();
+    key = $("k").value;
+    try { await api("/api/ga/login", { method: "POST" }); }
+    catch (er) { return loginView(er.message || "Wrong key"); }
+    try { sessionStorage.setItem("ga_key", key); } catch (er) {}
+    loadTeam().then(() => render(true));
+  };
 }
 
 async function act(action, extra = {}) {

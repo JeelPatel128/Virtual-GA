@@ -148,6 +148,10 @@
         <textarea id="approversList" rows="3"></textarea>
         <button class="btn" style="margin-top:10px">Save</button><div class="msgline" id="approversMsg"></div></form>
       <div class="card"><h2>Approval log</h2><div id="approvalLog">Loading...</div></div>
+      <div class="card"><h2>Admin audit log</h2>
+        <p class="hint">Every admin action (not plain viewing) - who, what, when. "Who" is a name typed
+        at sign-in, not a verified login - there's one shared admin password, not individual accounts.</p>
+        <div id="auditLog">Loading...</div></div>
       <form class="card" id="retentionForm"><h2>Data retention</h2>
         <p class="hint">Preview mode (default): every day this logs what it WOULD anonymize or delete,
         without changing anything. Turn "Enable retention" on once you've checked a preview and are
@@ -176,14 +180,16 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let key = null; try { key = sessionStorage.getItem("admin_key"); } catch (e) {}
+let adminName = null; try { adminName = localStorage.getItem("admin_name"); } catch (e) {}
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 async function api(path, opts = {}) {
-  const h = { "X-Admin-Key": key || "" };
+  const h = { "X-Admin-Key": key || "", "X-Admin-Name": adminName || "" };
   if (!(opts.body instanceof FormData)) h["Content-Type"] = "application/json";
   const r = await fetch(path, { ...opts, headers: h });
   const d = await r.json().catch(() => ({}));
   if (r.status === 401) { showGate("Wrong password"); throw new Error("Wrong password"); }
+  if (r.status === 429) { showGate(d.detail || "Too many failed attempts. Try again later."); throw new Error(d.detail || "Locked"); }
   if (!r.ok) throw new Error(d.detail ? (typeof d.detail === "string" ? d.detail : "Check the fields") : "Error");
   return d;
 }
@@ -191,11 +197,18 @@ function flash(id, text, bad) { const el = $(id); el.textContent = text; el.clas
 
 function showGate(msg) {
   $("main").style.display = "none";
-  $("gate").innerHTML = `<form class="card" id="login"><h2>Admin sign in</h2><label for="pw">Password</label>
+  $("gate").innerHTML = `<form class="card" id="login"><h2>Admin sign in</h2>
+    <label for="an">Your name (for the audit log)</label><input id="an" value="${esc(adminName || "")}">
+    <label for="pw">Password</label>
     <input id="pw" type="password" autocomplete="current-password"><div class="err">${esc(msg || "")}</div>
     <button class="btn" style="margin-top:10px">Sign in</button></form>`;
-  $("login").onsubmit = async (e) => { e.preventDefault(); key = $("pw").value; try { sessionStorage.setItem("admin_key", key); } catch (er) {}
-    try { await api("/api/admin/login", { method: "POST" }); boot(); } catch (er) {} };
+  $("login").onsubmit = async (e) => {
+    e.preventDefault();
+    key = $("pw").value;
+    adminName = $("an").value.trim() || "Admin";
+    try { sessionStorage.setItem("admin_key", key); localStorage.setItem("admin_name", adminName); } catch (er) {}
+    try { await api("/api/admin/login", { method: "POST" }); boot(); } catch (er) {}
+  };
 }
 
 async function loadDocs() {
@@ -361,6 +374,10 @@ async function loadSetup() {
     log.entries.map(e => `<tr><td>${esc(e.at)}</td><td>#${e.ticket_id}</td><td>${esc(e.resource_id)}</td>
     <td>${esc(e.actor)}</td><td>${esc(e.action)}</td><td>${esc(e.reason || "")}</td></tr>`).join("")}</table>`
     : '<p class="hint">No approval activity yet.</p>';
+  const audit = await api("/api/admin/audit-log");
+  $("auditLog").innerHTML = audit.entries.length ? `<table><tr><th>When</th><th>Who</th><th>Action</th></tr>${
+    audit.entries.map(e => `<tr><td>${esc(e.at)}</td><td>${esc(e.admin_name)}</td><td>${esc(e.method)} ${esc(e.path)}</td></tr>`).join("")}</table>`
+    : '<p class="hint">No admin actions logged yet.</p>';
   await loadRetention();
 }
 

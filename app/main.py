@@ -9,7 +9,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from . import approvals, directory, inventory, knowledge, llm, retention, schedule, storage, teams, tickets, tokens
 from .config import BASE_DIR, load_team, settings
 from .db import (ApprovalLog, ChatSession, Doc, Item, Message, Person, QueryLog, SessionLocal, TaskFile,
-                 Ticket, get_today_note, init_db, set_today_note, utcnow)
+                 Ticket, get_today_note, init_db, kv_get, kv_set, set_today_note, utcnow)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("virtual_ga")
@@ -32,6 +32,27 @@ async def lifespan(_app):
 
 app = FastAPI(title="Virtual GA", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+@app.middleware("http")
+async def admin_audit_log(request: Request, call_next):
+    """Logs every admin-authenticated write (not a read, and not /api/admin/login,
+    which the rate limiter already tracks) - who/what/when, in one place rather than
+    touching every admin route individually. "Who" is best-effort (X-Admin-Name, see
+    admin.html) since ADMIN_PASSWORD is one shared credential, not a per-user login."""
+    response = await call_next(request)
+    path = request.url.path
+    if (path.startswith("/api/admin/") and path != "/api/admin/login"
+            and request.method in ("POST", "PUT", "DELETE") and response.status_code < 400):
+        from .db import AdminActionLog
+        db = SessionLocal()
+        try:
+            db.add(AdminActionLog(admin_name=request.headers.get("x-admin-name") or "Admin",
+                                  method=request.method, path=path))
+            db.commit()
+        finally:
+            db.close()
+    return response
 
 GREETING = ("Hi! I'm the Virtual GA for the School of Business front desk. Ask me anything, "
             "like where a room is, how to get a form, or who to talk to. If I can't help, "
@@ -69,6 +90,33 @@ def require_admin(x_admin_key: str | None = Header(None)):
 def require_ga(x_ga_key: str | None = Header(None)):
     if not (_eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD)):
         raise HTTPException(401, "Wrong GA key")
+
+
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCK_MINUTES = 15
+
+
+def _login_rate_limit(db, kind: str, ok: bool) -> None:
+    """Shared by /api/admin/login and /api/ga/login only - the explicit login check
+    each console's login form makes, not every already-authenticated request (which
+    would make a handful of unrelated 401s elsewhere lock everyone out). ADMIN_PASSWORD
+    and GA_KEY are each one shared credential, not per-user accounts, so the lockout is
+    global rather than per-caller; tracked in KV so it survives a restart."""
+    locked_key, count_key = f"{kind}_login_locked_until", f"{kind}_login_fail_count"
+    raw = kv_get(db, locked_key)
+    if raw and datetime.fromisoformat(raw) > utcnow():
+        until = datetime.fromisoformat(raw)
+        raise HTTPException(429, f"Too many failed attempts. Try again after {until.strftime('%H:%M UTC')}.")
+    if ok:
+        kv_set(db, count_key, "0")
+        db.commit()
+        return
+    count = int(kv_get(db, count_key) or "0") + 1
+    if count >= LOGIN_MAX_FAILURES:
+        kv_set(db, locked_key, (utcnow() + timedelta(minutes=LOGIN_LOCK_MINUTES)).isoformat())
+        count = 0
+    kv_set(db, count_key, str(count))
+    db.commit()
 
 
 def _staff_or_ga_key(x_ga_key: str | None) -> bool:
@@ -797,8 +845,21 @@ class SettingsIn(BaseModel):
     show_extensions: bool
 
 
-@app.post("/api/admin/login", dependencies=[Depends(require_admin)])
-def admin_login():
+@app.post("/api/admin/login")
+def admin_login(x_admin_key: str | None = Header(None), db=Depends(get_db)):
+    ok = _eq(x_admin_key, settings.ADMIN_PASSWORD)
+    _login_rate_limit(db, "admin", ok)
+    if not ok:
+        raise HTTPException(401, "Wrong admin password")
+    return {"ok": True}
+
+
+@app.post("/api/ga/login")
+def ga_login(x_ga_key: str | None = Header(None), db=Depends(get_db)):
+    ok = _eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD)
+    _login_rate_limit(db, "ga", ok)
+    if not ok:
+        raise HTTPException(401, "Wrong GA key")
     return {"ok": True}
 
 
@@ -1074,6 +1135,14 @@ def get_approval_log(db=Depends(get_db)):
     rows = db.scalars(select(ApprovalLog).order_by(ApprovalLog.id.desc()).limit(100)).all()
     return {"entries": [{"id": r.id, "ticket_id": r.ticket_id, "resource_id": r.resource_id,
                          "actor": r.actor, "action": r.action, "reason": r.reason,
+                         "at": tickets.local(r.at).strftime("%b %d %I:%M %p")} for r in rows]}
+
+
+@app.get("/api/admin/audit-log", dependencies=[Depends(require_admin)])
+def get_audit_log(db=Depends(get_db)):
+    from .db import AdminActionLog
+    rows = db.scalars(select(AdminActionLog).order_by(AdminActionLog.id.desc()).limit(200)).all()
+    return {"entries": [{"id": r.id, "admin_name": r.admin_name, "method": r.method, "path": r.path,
                          "at": tickets.local(r.at).strftime("%b %d %I:%M %p")} for r in rows]}
 
 

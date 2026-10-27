@@ -1085,6 +1085,74 @@ def test_retention_preview_mode_and_real_anonymization():
     print("retention preview/apply test passed")
 
 
+def test_login_rate_limit_locks_after_five_failures():
+    """app/main.py::_login_rate_limit - shared only by the two explicit login checks
+    (/api/admin/login, /api/ga/login), not every already-authenticated request, so the
+    many unrelated 401s elsewhere in this suite (missing/wrong keys on other routes)
+    never trip it. Lockout is global, not per-caller - ADMIN_PASSWORD/GA_KEY are each
+    one shared credential, not per-user accounts - and admin/GA counters are separate."""
+    from app.db import KV
+
+    with TestClient(app) as c:
+        db = SessionLocal()
+        for key in ("admin_login_fail_count", "admin_login_locked_until",
+                   "ga_login_fail_count", "ga_login_locked_until"):
+            row = db.get(KV, key)
+            if row:
+                db.delete(row)
+        db.commit(); db.close()
+
+        for _ in range(4):
+            assert c.post("/api/admin/login", headers={"X-Admin-Key": "nope"}).status_code == 401
+        # a success before the 5th failure resets the count - no lock yet
+        assert c.post("/api/admin/login", headers=A).status_code == 200
+        for _ in range(4):
+            assert c.post("/api/admin/login", headers={"X-Admin-Key": "nope"}).status_code == 401
+        # the 5th failure itself still reports as a normal wrong-key 401...
+        assert c.post("/api/admin/login", headers={"X-Admin-Key": "nope"}).status_code == 401
+        # ...but trips the lock: even the CORRECT key is rejected for the next 15 minutes
+        locked = c.post("/api/admin/login", headers=A)
+        assert locked.status_code == 429 and "Too many" in locked.json()["detail"]
+        assert c.post("/api/admin/login", headers={"X-Admin-Key": "nope"}).status_code == 429
+
+        # GA's counter is entirely separate - still unlocked
+        assert c.post("/api/ga/login", headers={"X-GA-Key": "gakey"}).status_code == 200
+
+        db = SessionLocal()
+        for key in ("admin_login_fail_count", "admin_login_locked_until",
+                   "ga_login_fail_count", "ga_login_locked_until"):
+            row = db.get(KV, key)
+            if row:
+                db.delete(row)
+        db.commit(); db.close()
+    print("login rate limit test passed")
+
+
+def test_admin_audit_log_covers_writes_not_reads_or_login():
+    """app/main.py::admin_audit_log middleware - logs who/what/when for an admin WRITE
+    (POST/PUT/DELETE under /api/admin/), not a plain read, and not /api/admin/login
+    itself (the rate limiter already covers that). "Who" comes from X-Admin-Name,
+    best-effort since there's one shared admin password, not per-user accounts."""
+    with TestClient(app) as c:
+        before = len(c.get("/api/admin/audit-log", headers=A).json()["entries"])
+
+        qa_id = c.post("/api/admin/qa", headers={**A, "X-Admin-Name": "Jeel"},
+                       json={"question": "Audit log test Q", "answer": "A"}).json()["id"]
+        c.get("/api/admin/docs", headers=A)  # a read - must not be logged
+        c.post("/api/admin/login", headers=A)  # covered by rate limiting, not this log
+
+        entries = c.get("/api/admin/audit-log", headers=A).json()["entries"]
+        assert len(entries) == before + 1
+        assert entries[0]["admin_name"] == "Jeel" and entries[0]["method"] == "POST"
+        assert entries[0]["path"] == "/api/admin/qa"
+
+        # no X-Admin-Name sent at all -> falls back to a generic placeholder, never blocks
+        c.delete(f"/api/admin/docs/{qa_id}", headers=A)
+        entries2 = c.get("/api/admin/audit-log", headers=A).json()["entries"]
+        assert entries2[0]["admin_name"] == "Admin" and entries2[0]["method"] == "DELETE"
+    print("admin audit log test passed")
+
+
 def test_storage_module_degrades_and_builds_correct_requests():
     """app/storage.py: offline tests only, no real network calls. Mocks requests.* to
     check it builds the right calls, and confirms it degrades gracefully (returns None /
@@ -2293,6 +2361,8 @@ if __name__ == "__main__":
     test_database_safety_guard()
     test_rls_is_a_postgres_only_noop_in_sqlite_tests()
     test_retention_preview_mode_and_real_anonymization()
+    test_login_rate_limit_locks_after_five_failures()
+    test_admin_audit_log_covers_writes_not_reads_or_login()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

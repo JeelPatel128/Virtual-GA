@@ -186,6 +186,19 @@ class ApprovalLog(Base):
     at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class AdminActionLog(Base):
+    """Every admin-authenticated write (POST/PUT/DELETE under /api/admin/), logged by
+    app/main.py's admin_audit_log middleware - who (best-effort, from X-Admin-Name; the
+    admin password is one shared credential, not a per-user login, so this is a hint the
+    admin typed, not a verified identity), what (method + path), when."""
+    __tablename__ = "admin_action_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    admin_name: Mapped[str] = mapped_column(String(120), default="Admin")
+    method: Mapped[str] = mapped_column(String(10))
+    path: Mapped[str] = mapped_column(String(300))
+    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class StaffApprovalLink(Base):
     """One issued staff approve/decline link (app/tokens.py). The token embeds and signs
     its own expiry, but single-use has to live here - a signature alone can't be marked

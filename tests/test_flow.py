@@ -917,6 +917,25 @@ def test_database_safety_guard():
     print("database safety guard test passed")
 
 
+def test_rls_is_a_postgres_only_noop_in_sqlite_tests():
+    """app/db.py::_ensure_rls/rls_status - real enforcement only happens against a
+    Postgres engine (verified separately against the actual Supabase dev database once
+    DATABASE_URL_DEV is reachable; this repo's tests only ever run on SQLite). Here we
+    just confirm both functions recognize a non-Postgres engine and no-op/return empty
+    rather than erroring or silently doing nothing on the wrong database by mistake -
+    and that the admin status panel exposes the field at all."""
+    from app import db as _db
+
+    assert _db.engine.dialect.name == "sqlite"
+    _db._ensure_rls()  # must not raise on SQLite
+    assert _db.rls_status() == []
+
+    with TestClient(app) as c:
+        s = c.get("/api/admin/status", headers=A).json()
+        assert s["tables_without_rls"] == []
+    print("RLS postgres-only no-op test passed")
+
+
 def test_storage_module_degrades_and_builds_correct_requests():
     """app/storage.py: offline tests only, no real network calls. Mocks requests.* to
     check it builds the right calls, and confirms it degrades gracefully (returns None /
@@ -2077,6 +2096,7 @@ if __name__ == "__main__":
     test_ga_resources_import_and_audience_gating()
     test_approval_gated_resource_request_flow()
     test_database_safety_guard()
+    test_rls_is_a_postgres_only_noop_in_sqlite_tests()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

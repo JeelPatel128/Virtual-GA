@@ -359,9 +359,40 @@ def _ensure_columns(eng=None) -> None:
                 conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
 
+def _ensure_rls(eng=None) -> None:
+    """Enables row-level security on every table, with no policies defined. The app
+    always connects to Postgres as the table owner (DATABASE_URL/DATABASE_URL_DEV), which
+    bypasses RLS regardless of policies - this is a backstop against the Supabase anon or
+    authenticated roles (which the app never uses or exposes; it only ever holds
+    SUPABASE_SERVICE_KEY, for the Storage API) ever being able to read these tables
+    directly through some other route, like PostgREST. A no-op on SQLite, which has no
+    such concept."""
+    eng = eng or engine
+    if eng.dialect.name != "postgresql":
+        return
+    with eng.begin() as conn:
+        for table in Base.metadata.tables:
+            conn.exec_driver_sql(f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY')
+
+
+def rls_status(eng=None) -> list[str]:
+    """Tables (if any) where row-level security is off, checked live rather than cached
+    from startup, for the admin status panel. Always empty on SQLite."""
+    eng = eng or engine
+    if eng.dialect.name != "postgresql":
+        return []
+    names = ", ".join(f"'{t}'" for t in Base.metadata.tables)
+    with eng.connect() as conn:
+        rows = conn.exec_driver_sql(
+            f"SELECT relname FROM pg_class WHERE relkind = 'r' AND relrowsecurity = false "
+            f"AND relname IN ({names})").fetchall()
+    return sorted(row[0] for row in rows)
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
     _ensure_columns()
+    _ensure_rls()
 
 
 def kv_get(db, key: str) -> str | None:

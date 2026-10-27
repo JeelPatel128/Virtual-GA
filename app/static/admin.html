@@ -330,6 +330,9 @@ async function loadSetup() {
     ${row("Gemini AI", s.ai_enabled, "GEMINI_API_KEY. Without it the bot uses keyword search and can't read images or video.")}
     ${row("Teams alerts", s.teams_configured, "TEAMS_WEBHOOK_URL from a Teams Workflow.")}
     ${row("Google Calendar", s.calendar_configured, "GCAL_ICS_URL, the calendar's secret iCal address.")}
+    ${row("Row-level security", s.tables_without_rls.length === 0, s.tables_without_rls.length
+      ? "RLS is OFF on: " + s.tables_without_rls.join(", ") + ". Re-run startup (init_db) against this database to turn it back on."
+      : "Enabled on every table (SQLite shows this as Ready - RLS is a Postgres-only concept).")}
     </table><p class="hint">Public link: ${esc(s.public_url)} · Open tickets: ${s.open_tickets}</p>
     <p><b>Team:</b> ${s.team.map(g => esc(g.name) + (g.lead ? " (lead)" : "")).join(", ") || '<span class="no">team.json is empty</span>'}</p>`;
   const settings = await api("/api/admin/settings");

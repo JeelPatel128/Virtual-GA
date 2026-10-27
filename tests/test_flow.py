@@ -605,6 +605,190 @@ def test_ga_resources_import_and_audience_gating():
     print("GA resources import + audience gating test passed")
 
 
+APPROVAL_RESOURCE_FIXTURE_CSV = (
+    "resource_id,title,source_file,audience,faq_ids,summary,seasonal,notes\n"
+    'TRES-APR,Test Employment Verification Form,test-approval-fixture.pdf,approval_required,,'
+    "Test ISSS employment verification form summary, never shown to a visitor.,no,\n"
+)
+
+
+def test_approval_gated_resource_request_flow():
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        from sqlalchemy import select
+        from app import approvals, knowledge
+        from app.db import ApprovalLog as _ApprovalLog, Doc as _Doc, utcnow as db_utcnow
+
+        r = c.post("/api/admin/resources/import", headers=A,
+                  files={"file": ("res.csv", APPROVAL_RESOURCE_FIXTURE_CSV.encode(), "text/csv")})
+        assert r.status_code == 200 and r.json() == {"missing_columns": [], "imported": 1, "errors": []}, r.text
+
+        # --- 1. never leaks the PDF, a link to it, or its text, across 5 phrasings ---
+        phrasings = [
+            "I need the employment verification form",
+            "where do I get the on-campus job form",
+            "I need the form for my SSN",
+            "can I get the verification form",
+            "just send me the form",
+        ]
+        for phrase in phrasings:
+            db = SessionLocal()
+            hits = knowledge.search(db, phrase)  # visitor=True by default
+            db.close()
+            assert not any(h["title"] == "Test Employment Verification Form" for h in hits), phrase
+
+            sid = c.post("/api/session").json()["session_id"]
+            last = _ask_text(c, sid, phrase)
+            assert "never shown to a visitor" not in last["text"], (phrase, last["text"])
+            assert "test-approval-fixture" not in last["text"], (phrase, last["text"])
+            assert last["meta"].get("offer_approval_request") is True, (phrase, last)
+            assert last["meta"]["resource_id"] == "TRES-APR"
+
+        # mentioning a completed/filled-in form is refused, not offered
+        sid0 = c.post("/api/session").json()["session_id"]
+        last0 = _ask_text(c, sid0, "I already filled out the employment verification form, can I send it to you?")
+        assert "SEVIS ID" in last0["text"] and "date of birth" in last0["text"]
+        assert not last0["meta"].get("offer_approval_request")
+
+        # --- request a copy, decline with a reason ---
+        sid = c.post("/api/session").json()["session_id"]
+        r = c.post(f"/api/session/{sid}/request-approval", json={
+            "name": "Alex Student", "email": "alex@stevens.edu", "department": "SSB",
+            "resource_id": "TRES-APR"})
+        assert r.status_code == 200, r.text
+        tid = r.json()["ticket_id"]
+        token = tickets.ticket_token(tid)
+        c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
+        assert c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+                      json={"ga_name": "GA Two", "action": "decline"}).status_code == 400  # reason required
+        r2 = c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
+                   json={"ga_name": "GA Two", "action": "decline", "reason": "Not eligible this semester"})
+        assert r2.status_code == 200
+        s = c.get(f"/api/status/{tid}?t={token}").json()
+        assert s["status"] == "cancelled" and s["decline_reason"] == "Not eligible this semester"
+        assert c.get(f"/api/status/{tid}/download?t={token}").status_code == 403
+
+        db = SessionLocal()
+        db.delete(db.get(Ticket, tid)); db.commit(); db.close()
+
+        # --- approve: downloadable within 24h, fails for another ticket's token, fails after 24h ---
+        import tempfile
+        fixture_path = knowledge.RESOURCES_DIR / "test-approval-fixture.pdf"
+        knowledge.RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
+        fixture_path.write_bytes(b"%PDF-1.4 fake approval fixture content")
+        try:
+            sid2 = c.post("/api/session").json()["session_id"]
+            tid2 = c.post(f"/api/session/{sid2}/request-approval", json={
+                "name": "Bo Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
+            token2 = tickets.ticket_token(tid2)
+            c.post(f"/api/ga/ticket/{tid2}/claim", headers=GA, json={"ga_name": "GA Two"})
+            assert c.post(f"/api/ga/ticket/{tid2}/action", headers=GA,
+                         json={"ga_name": "GA Two", "action": "approve"}).status_code == 200
+
+            s2 = c.get(f"/api/status/{tid2}?t={token2}").json()
+            assert s2["status"] == "done" and s2["downloadable"] is True
+            dl = c.get(f"/api/status/{tid2}/download?t={token2}")
+            assert dl.status_code == 200 and dl.content == b"%PDF-1.4 fake approval fixture content"
+
+            # fails for a different ticket's token
+            sid3 = c.post("/api/session").json()["session_id"]
+            tid3 = c.post(f"/api/session/{sid3}/request-approval", json={
+                "name": "Cam Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
+            other_token = tickets.ticket_token(tid3)
+            assert c.get(f"/api/status/{tid2}/download?t={other_token}").status_code == 401
+
+            # fails after 24 hours
+            db = SessionLocal()
+            row = db.get(Ticket, tid2)
+            row.resolved_at = db_utcnow() - timedelta(hours=25)
+            db.commit(); db.close()
+            assert c.get(f"/api/status/{tid2}/download?t={token2}").status_code == 403
+
+            db = SessionLocal()
+            db.delete(db.get(Ticket, tid2)); db.delete(db.get(Ticket, tid3)); db.commit(); db.close()
+        finally:
+            fixture_path.unlink(missing_ok=True)
+
+        # --- hand in person: no download offered ---
+        sid4 = c.post("/api/session").json()["session_id"]
+        tid4 = c.post(f"/api/session/{sid4}/request-approval", json={
+            "name": "Dee Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid4}/claim", headers=GA, json={"ga_name": "GA Two"})
+        c.post(f"/api/ga/ticket/{tid4}/action", headers=GA, json={"ga_name": "GA Two", "action": "hand_in_person"})
+        token4 = tickets.ticket_token(tid4)
+        s4 = c.get(f"/api/status/{tid4}?t={token4}").json()
+        assert s4["status"] == "done" and s4["handoff_method"] == "in_person" and s4["downloadable"] is False
+
+        # --- staff are never auto-notified; asking is a one-off, manual GA action ---
+        db = SessionLocal()
+        assert db.scalars(select(_ApprovalLog).where(_ApprovalLog.ticket_id == tid4,
+                                                      _ApprovalLog.action == "asked_staff")).first() is None
+        db.close()
+
+        sid5 = c.post("/api/session").json()["session_id"]
+        tid5 = c.post(f"/api/session/{sid5}/request-approval", json={
+            "name": "Evan Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
+        c.post(f"/api/ga/ticket/{tid5}/claim", headers=GA, json={"ga_name": "GA Two"})
+        teams.sent_cards.clear()
+        r5 = c.post(f"/api/ga/ticket/{tid5}/ask-staff", headers=GA,
+                   json={"ga_name": "GA Two", "staff_name": "Josa Balisi"})
+        assert r5.status_code == 400  # no "Josa Balisi" in the directory in this test env
+
+        # add a fake approver to the directory and the approvers-list setting, then ask
+        # again - no SMTP in this test env, so the GA gets the link back to forward
+        # themselves rather than an auto-send
+        db = SessionLocal()
+        from app.db import Person as _Person
+        staff = _Person(name="Test Approver", email="approver@stevens.edu", active=True)
+        db.add(staff); db.commit(); staff_id = staff.id; db.close()
+        assert c.post("/api/admin/approvers", headers=A, json={"names": ["Test Approver"]}).status_code == 200
+        r6 = c.post(f"/api/ga/ticket/{tid5}/ask-staff", headers=GA,
+                   json={"ga_name": "GA Two", "staff_name": "Test Approver"})
+        assert r6.status_code == 200 and r6.json()["emailed"] is False and "/approve/" in r6.json()["link"]
+        assert len(teams.sent_cards) == 0, "asking a staff approver must never post to Teams"
+
+        db = SessionLocal()
+        asked = db.scalars(select(_ApprovalLog).where(_ApprovalLog.ticket_id == tid5,
+                                                       _ApprovalLog.action == "asked_staff")).first()
+        assert asked is not None and asked.actor == "GA Two" and asked.reason == "Test Approver"
+        db.close()
+
+        # --- the staff member decides through their own signed link, not ga_action ---
+        token5 = tickets.ticket_token(tid5)
+        assert c.get(f"/api/approve/{tid5}?t={token5}").json()["resource_title"] == "Test Employment Verification Form"
+        assert c.post(f"/api/approve/{tid5}?t={token5}", json={"decision": "declined"}).status_code == 400  # reason required
+        r7 = c.post(f"/api/approve/{tid5}?t={token5}", json={"decision": "declined", "reason": "Missing paperwork"})
+        assert r7.status_code == 200 and r7.json()["status"] == "cancelled"
+
+        db = SessionLocal()
+        logged = db.scalars(select(_ApprovalLog).where(_ApprovalLog.ticket_id == tid5,
+                                                        _ApprovalLog.action == "declined")).first()
+        assert logged is not None and logged.actor == "Test Approver" and logged.reason == "Missing paperwork"
+        t5 = db.get(Ticket, tid5)
+        assert t5.cancelled_reason == "Missing paperwork"
+        db.delete(t5); db.delete(db.get(_Person, staff_id)); db.commit(); db.close()
+
+        # --- admin audit log is populated ---
+        log = c.get("/api/admin/approval-log", headers=A).json()["entries"]
+        assert any(e["action"] == "declined" for e in log)
+
+        assert c.post("/api/admin/approvers", headers=A,
+                      json={"names": approvals.DEFAULT_APPROVER_NAMES}).status_code == 200
+        db = SessionLocal()
+        for t in (tid4, tid5):
+            row = db.get(Ticket, t)
+            if row:
+                db.delete(row)
+        db.commit(); db.close()
+        for ext_id in ("TRES-APR",):
+            db = SessionLocal()
+            d = db.scalars(select(_Doc).where(_Doc.external_id == ext_id)).first()
+            db.close()
+            if d:
+                c.delete(f"/api/admin/docs/{d.id}", headers=A)
+    print("approval-gated resource request flow test passed")
+
+
 def test_storage_module_degrades_and_builds_correct_requests():
     """app/storage.py: offline tests only, no real network calls. Mocks requests.* to
     check it builds the right calls, and confirms it degrades gracefully (returns None /
@@ -1761,6 +1945,7 @@ if __name__ == "__main__":
     test_today_note_expiry_ga_endpoints_and_ask_shortcircuit()
     test_inventory_import_matching_borrow_and_ga_search()
     test_ga_resources_import_and_audience_gating()
+    test_approval_gated_resource_request_flow()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

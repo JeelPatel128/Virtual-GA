@@ -1,7 +1,6 @@
 """All settings come from environment variables (see .env.example)."""
 import json
 import os
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,23 +13,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 def _bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _detect_git_branch() -> str:
-    """RENDER_GIT_BRANCH (Render sets this for every deploy) or GIT_BRANCH (a plain
-    override, e.g. for tests) wins; a local `git` checkout is the fallback for running
-    directly on a dev machine. "unknown" (never "main") if none of that resolves, so an
-    environment we can't identify is treated as non-production rather than silently
-    assumed safe."""
-    env_branch = os.getenv("RENDER_GIT_BRANCH") or os.getenv("GIT_BRANCH")
-    if env_branch:
-        return env_branch
-    try:
-        result = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(BASE_DIR),
-                                capture_output=True, text=True, timeout=5)
-        return result.stdout.strip() or "unknown"
-    except Exception:
-        return "unknown"
 
 
 @dataclass
@@ -54,14 +36,16 @@ class Settings:
     CRON_SECRET = os.getenv("CRON_SECRET", "cron")
     TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
 
-    # Database: only the main branch (deployed on Render) ever uses DATABASE_URL, the
-    # production Supabase connection. Every other branch - and tests - uses
-    # DATABASE_URL_DEV, falling back to a local SQLite file if that's unset, never to
-    # DATABASE_URL itself. See EFFECTIVE_DATABASE_URL and app/db.py's startup check.
-    GIT_BRANCH = _detect_git_branch()
+    # Database: an explicit APP_ENV setting, not git-branch detection (unreliable on
+    # Render, and a false negative there would stop production itself from starting).
+    # APP_ENV=production (set in render.yaml, only on the Render service deployed from
+    # main) uses DATABASE_URL. Anything else (default "dev" - every other branch, and
+    # tests) uses DATABASE_URL_DEV, falling back to a local SQLite file if that's unset,
+    # never to DATABASE_URL itself. See EFFECTIVE_DATABASE_URL and app/db.py's startup check.
+    APP_ENV = os.getenv("APP_ENV", "dev")
     DATABASE_URL = os.getenv("DATABASE_URL", "")
     DATABASE_URL_DEV = os.getenv("DATABASE_URL_DEV", "")
-    if GIT_BRANCH == "main":
+    if APP_ENV == "production":
         EFFECTIVE_DATABASE_URL = DATABASE_URL or f"sqlite:///{BASE_DIR / 'virtual_ga.db'}"
     else:
         EFFECTIVE_DATABASE_URL = DATABASE_URL_DEV or f"sqlite:///{BASE_DIR / 'virtual_ga_dev.db'}"
@@ -109,16 +93,17 @@ settings = Settings()
 
 
 def check_database_safety() -> None:
-    """Refuses to start if a non-main branch somehow ends up pointed at the production
-    DATABASE_URL - the one case the branch-aware EFFECTIVE_DATABASE_URL selection above
-    can't itself prevent (e.g. DATABASE_URL_DEV mistakenly set to the same value).
-    Called once at startup, before anything touches the database - see app/db.py."""
-    if (settings.GIT_BRANCH != "main" and settings.DATABASE_URL
+    """Refuses to start if APP_ENV isn't "production" but the database in use is
+    somehow the production DATABASE_URL anyway - the one case the APP_ENV-based
+    EFFECTIVE_DATABASE_URL selection above can't itself prevent (e.g. DATABASE_URL_DEV
+    mistakenly set to the same value). Called once at startup, before anything touches
+    the database - see app/db.py."""
+    if (settings.APP_ENV != "production" and settings.DATABASE_URL
             and settings.EFFECTIVE_DATABASE_URL == settings.DATABASE_URL):
         raise RuntimeError(
-            f"Refusing to start: branch '{settings.GIT_BRANCH}' is not main, but the "
-            "database in use is the production DATABASE_URL. Set DATABASE_URL_DEV to a "
-            "non-production database for this branch instead."
+            f"Refusing to start: APP_ENV={settings.APP_ENV!r} is not 'production', but "
+            "the database in use is the production DATABASE_URL. Set DATABASE_URL_DEV "
+            "to a non-production database instead."
         )
 
 

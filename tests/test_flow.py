@@ -617,7 +617,8 @@ def test_approval_gated_resource_request_flow():
         GA = {"X-GA-Key": "gakey"}
         from sqlalchemy import select
         from app import approvals, knowledge
-        from app.db import ApprovalLog as _ApprovalLog, Doc as _Doc, utcnow as db_utcnow
+        from app import tokens as tk
+        from app.db import ApprovalLog as _ApprovalLog, Doc as _Doc, StaffApprovalLink as _StaffApprovalLink, utcnow as db_utcnow
 
         r = c.post("/api/admin/resources/import", headers=A,
                   files={"file": ("res.csv", APPROVAL_RESOURCE_FIXTURE_CSV.encode(), "text/csv")})
@@ -657,7 +658,7 @@ def test_approval_gated_resource_request_flow():
             "resource_id": "TRES-APR"})
         assert r.status_code == 200, r.text
         tid = r.json()["ticket_id"]
-        token = tickets.ticket_token(tid)
+        token = tk.status_token(tid)
         c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
         assert c.post(f"/api/ga/ticket/{tid}/action", headers=GA,
                       json={"ga_name": "GA Two", "action": "decline"}).status_code == 400  # reason required
@@ -666,13 +667,19 @@ def test_approval_gated_resource_request_flow():
         assert r2.status_code == 200
         s = c.get(f"/api/status/{tid}?t={token}").json()
         assert s["status"] == "cancelled" and s["decline_reason"] == "Not eligible this semester"
-        assert c.get(f"/api/status/{tid}/download?t={token}").status_code == 403
+        assert "download_url" not in s
+
+        # a status token is scoped to "status" only - it can't approve, decline, or download
+        assert c.get(f"/api/approve/{tid}?t={token}").status_code == 401
+        assert c.post(f"/api/approve/{tid}?t={token}", json={"decision": "approved"}).status_code == 401
+        dl_token_for_declined = tk.download_token(tid, db_utcnow())
+        assert c.get(f"/api/status/{tid}/download?t={dl_token_for_declined}").status_code == 403  # right purpose, but never approved
 
         db = SessionLocal()
         db.delete(db.get(Ticket, tid)); db.commit(); db.close()
 
-        # --- approve: downloadable within 24h, fails for another ticket's token, fails after 24h ---
-        import tempfile
+        # --- approve: downloadable within 24h via the server's own download_url, fails
+        # for another ticket's token, a download token can't approve, fails after 24h ---
         fixture_path = knowledge.RESOURCES_DIR / "test-approval-fixture.pdf"
         knowledge.RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
         fixture_path.write_bytes(b"%PDF-1.4 fake approval fixture content")
@@ -680,29 +687,41 @@ def test_approval_gated_resource_request_flow():
             sid2 = c.post("/api/session").json()["session_id"]
             tid2 = c.post(f"/api/session/{sid2}/request-approval", json={
                 "name": "Bo Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
-            token2 = tickets.ticket_token(tid2)
+            token2 = tk.status_token(tid2)
             c.post(f"/api/ga/ticket/{tid2}/claim", headers=GA, json={"ga_name": "GA Two"})
             assert c.post(f"/api/ga/ticket/{tid2}/action", headers=GA,
                          json={"ga_name": "GA Two", "action": "approve"}).status_code == 200
 
             s2 = c.get(f"/api/status/{tid2}?t={token2}").json()
             assert s2["status"] == "done" and s2["downloadable"] is True
-            dl = c.get(f"/api/status/{tid2}/download?t={token2}")
+            dl = c.get(s2["download_url"])
             assert dl.status_code == 200 and dl.content == b"%PDF-1.4 fake approval fixture content"
+            dl2_token = s2["download_url"].rsplit("t=", 1)[1]
 
-            # fails for a different ticket's token
+            # a download token can't approve
+            assert c.post(f"/api/approve/{tid2}?t={dl2_token}", json={"decision": "approved"}).status_code == 401
+
+            # fails for a different ticket's token (cross-ticket)
             sid3 = c.post("/api/session").json()["session_id"]
             tid3 = c.post(f"/api/session/{sid3}/request-approval", json={
                 "name": "Cam Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
-            other_token = tickets.ticket_token(tid3)
-            assert c.get(f"/api/status/{tid2}/download?t={other_token}").status_code == 401
+            other_dl_token = tk.download_token(tid3, db_utcnow())
+            assert c.get(f"/api/status/{tid2}/download?t={other_dl_token}").status_code == 401
 
-            # fails after 24 hours
+            # a token whose own embedded expiry is already in the past fails outright
+            already_expired_token = tk.download_token(tid2, db_utcnow() - timedelta(hours=25))
+            assert c.get(f"/api/status/{tid2}/download?t={already_expired_token}").status_code == 401
+
+            # 24 real hours later: the status page stops offering a download_url, and an
+            # old token minted before that (still cryptographically unexpired itself)
+            # is still caught by the business-logic check (approved + within the window)
             db = SessionLocal()
             row = db.get(Ticket, tid2)
             row.resolved_at = db_utcnow() - timedelta(hours=25)
             db.commit(); db.close()
-            assert c.get(f"/api/status/{tid2}/download?t={token2}").status_code == 403
+            s2b = c.get(f"/api/status/{tid2}?t={token2}").json()
+            assert "download_url" not in s2b  # no longer offered once expired
+            assert c.get(f"/api/status/{tid2}/download?t={dl2_token}").status_code == 403
 
             db = SessionLocal()
             db.delete(db.get(Ticket, tid2)); db.delete(db.get(Ticket, tid3)); db.commit(); db.close()
@@ -715,9 +734,10 @@ def test_approval_gated_resource_request_flow():
             "name": "Dee Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
         c.post(f"/api/ga/ticket/{tid4}/claim", headers=GA, json={"ga_name": "GA Two"})
         c.post(f"/api/ga/ticket/{tid4}/action", headers=GA, json={"ga_name": "GA Two", "action": "hand_in_person"})
-        token4 = tickets.ticket_token(tid4)
+        token4 = tk.status_token(tid4)
         s4 = c.get(f"/api/status/{tid4}?t={token4}").json()
         assert s4["status"] == "done" and s4["handoff_method"] == "in_person" and s4["downloadable"] is False
+        assert "download_url" not in s4
 
         # --- staff are never auto-notified; asking is a one-off, manual GA action ---
         db = SessionLocal()
@@ -746,6 +766,7 @@ def test_approval_gated_resource_request_flow():
                    json={"ga_name": "GA Two", "staff_name": "Test Approver"})
         assert r6.status_code == 200 and r6.json()["emailed"] is False and "/approve/" in r6.json()["link"]
         assert len(teams.sent_cards) == 0, "asking a staff approver must never post to Teams"
+        token5 = r6.json()["link"].rsplit("t=", 1)[1]  # the actual issued token, not independently minted
 
         db = SessionLocal()
         asked = db.scalars(select(_ApprovalLog).where(_ApprovalLog.ticket_id == tid5,
@@ -753,12 +774,26 @@ def test_approval_gated_resource_request_flow():
         assert asked is not None and asked.actor == "GA Two" and asked.reason == "Test Approver"
         db.close()
 
+        # a status token for the same ticket can't view or decide through the staff route
+        bad_status_token = tk.status_token(tid5)
+        assert c.get(f"/api/approve/{tid5}?t={bad_status_token}").status_code == 401
+        assert c.post(f"/api/approve/{tid5}?t={bad_status_token}", json={"decision": "approved"}).status_code == 401
+
+        # a staff token for a DIFFERENT ticket fails here (cross-ticket)
+        db = SessionLocal()
+        wrong_ticket_staff_token = tk.issue_staff_approval_link(db, tid4, "Test Approver")
+        db.close()
+        assert c.get(f"/api/approve/{tid5}?t={wrong_ticket_staff_token}").status_code == 401
+
         # --- the staff member decides through their own signed link, not ga_action ---
-        token5 = tickets.ticket_token(tid5)
         assert c.get(f"/api/approve/{tid5}?t={token5}").json()["resource_title"] == "Test Employment Verification Form"
         assert c.post(f"/api/approve/{tid5}?t={token5}", json={"decision": "declined"}).status_code == 400  # reason required
         r7 = c.post(f"/api/approve/{tid5}?t={token5}", json={"decision": "declined", "reason": "Missing paperwork"})
         assert r7.status_code == 200 and r7.json()["status"] == "cancelled"
+
+        # the same staff token can never be reused, for either viewing or deciding
+        assert c.get(f"/api/approve/{tid5}?t={token5}").status_code == 401
+        assert c.post(f"/api/approve/{tid5}?t={token5}", json={"decision": "approved"}).status_code == 401
 
         db = SessionLocal()
         logged = db.scalars(select(_ApprovalLog).where(_ApprovalLog.ticket_id == tid5,
@@ -767,6 +802,25 @@ def test_approval_gated_resource_request_flow():
         t5 = db.get(Ticket, tid5)
         assert t5.cancelled_reason == "Missing paperwork"
         db.delete(t5); db.delete(db.get(_Person, staff_id)); db.commit(); db.close()
+
+        # an expired (but otherwise valid and unused) staff token also fails
+        sid6 = c.post("/api/session").json()["session_id"]
+        tid6 = c.post(f"/api/session/{sid6}/request-approval", json={
+            "name": "Fay Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
+        db = SessionLocal()
+        staff2 = _Person(name="Test Approver 2", email="approver2@stevens.edu", active=True)
+        db.add(staff2); db.commit(); staff2_id = staff2.id
+        token6 = tk.issue_staff_approval_link(db, tid6, "Test Approver 2")
+        # match by nonce, not ticket_id - SQLite reuses freed ticket ids within a test
+        # run, so an earlier StaffApprovalLink row could share the same ticket_id
+        link_row = db.scalars(select(_StaffApprovalLink).where(
+            _StaffApprovalLink.nonce == tk.token_nonce(token6))).first()
+        link_row.expires_at = db_utcnow() - timedelta(hours=1)
+        db.commit(); db.close()
+        assert c.get(f"/api/approve/{tid6}?t={token6}").status_code == 401
+
+        db = SessionLocal()
+        db.delete(db.get(Ticket, tid6)); db.delete(db.get(_Person, staff2_id)); db.commit(); db.close()
 
         # --- admin audit log is populated ---
         log = c.get("/api/admin/approval-log", headers=A).json()["entries"]
@@ -976,7 +1030,8 @@ def test_requester_confirmation_page():
         tid = r.json()["ticket_id"]
         c.post(f"/api/ga/ticket/{tid}/claim", headers=GA, json={"ga_name": "GA Two"})
 
-        token = tickets.ticket_token(tid)
+        from app import tokens as _tokens
+        token = _tokens.status_token(tid)
         assert c.get(f"/api/status/{tid}?t=wrong").status_code == 401
         s = c.get(f"/api/status/{tid}?t={token}").json()
         assert s["status"] == "claimed" and s["confirm_prompt"] is False
@@ -1009,7 +1064,7 @@ def test_requester_confirmation_page():
         tid2 = r3.json()["ticket_id"]
         c.post(f"/api/ga/ticket/{tid2}/claim", headers=GA, json={"ga_name": "GA Two"})
         c.post(f"/api/ga/ticket/{tid2}/action", headers=GA, json={"ga_name": "GA Two", "action": "resolve"})
-        token2 = tickets.ticket_token(tid2)
+        token2 = _tokens.status_token(tid2)
         r4 = c.post(f"/api/status/{tid2}/confirm?t={token2}", json={"confirmed": True})
         assert r4.status_code == 200 and r4.json()["status"] == "done" and r4.json()["confirmed"] is True
         assert c.post(f"/api/status/{tid2}/confirm?t={token2}", json={"confirmed": True}).status_code == 409

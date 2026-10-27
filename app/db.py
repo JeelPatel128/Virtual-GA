@@ -184,6 +184,22 @@ class ApprovalLog(Base):
     at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class StaffApprovalLink(Base):
+    """One issued staff approve/decline link (app/tokens.py). The token embeds and signs
+    its own expiry, but single-use has to live here - a signature alone can't be marked
+    "already spent." Looked up by nonce (the random component inside the token), never by
+    ticket_id alone, so a new ask for the same ticket doesn't invalidate an older link
+    that's still mid-use."""
+    __tablename__ = "staff_approval_links"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id", ondelete="CASCADE"), index=True)
+    nonce: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    staff_name: Mapped[str] = mapped_column(String(200))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class QueryLog(Base):
     """Every question asked to the bot, for the daily digest and the 'questions to add' list."""
     __tablename__ = "query_log"

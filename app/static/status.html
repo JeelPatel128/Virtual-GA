@@ -44,7 +44,7 @@ function render(s) {
   if (s.kind === "approval") {
     if (s.downloadable) {
       html += `<p class="thanks">Approved! Your download is ready (available for 24 hours).</p>
-        <div class="actions"><a class="btn" style="text-decoration:none" href="/api/status/${ticketId}/download?t=${encodeURIComponent(token)}">Download</a></div>`;
+        <div class="actions"><a class="btn" style="text-decoration:none" href="${s.download_url}">Download</a></div>`;
     } else if (s.handoff_method === "in_person") {
       html += `<p class="thanks">This was handed to you in person.</p>`;
     } else if (s.status === "done") {

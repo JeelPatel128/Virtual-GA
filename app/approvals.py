@@ -11,7 +11,7 @@ from email.mime.text import MIMEText
 
 from sqlalchemy import select
 
-from . import tickets
+from . import tokens
 from .config import settings
 from .db import ApprovalLog, Doc, Person, Ticket, kv_get, kv_set
 
@@ -61,11 +61,7 @@ def set_approvers(db, names: list[str]) -> None:
     db.commit()
 
 
-def approval_url(ticket_id: int) -> str:
-    return f"{settings.PUBLIC_BASE_URL}/approve/{ticket_id}?t={tickets.ticket_token(ticket_id)}"
-
-
-def send_staff_approval_email(staff: Person, t: Ticket) -> bool:
+def send_staff_approval_email(staff: Person, t: Ticket, link: str) -> bool:
     """True if actually emailed. False (and the caller shows the link instead for the GA
     to forward manually) if SMTP isn't configured or sending fails - same
     degrade-gracefully pattern as the requester confirmation email."""
@@ -76,7 +72,8 @@ def send_staff_approval_email(staff: Person, t: Ticket) -> bool:
         f"Hi {staff.name.split()[0]},\n\n"
         f"A visitor at the SSB front desk has requested {resource_title}. "
         f"A GA is asking you to review this request.\n\n"
-        f"Approve or decline here: {approval_url(t.id)}\n\n"
+        f"Approve or decline here (this link is single-use and expires in "
+        f"{tokens.STAFF_APPROVE_WINDOW_HOURS} hours): {link}\n\n"
         "Thanks,\nStevens SSB Front Desk")
     msg["Subject"] = f"Approval needed: {resource_title}"
     msg["From"] = settings.SMTP_FROM or settings.SMTP_USER
@@ -111,8 +108,10 @@ def ask_staff_to_approve(db, t: Ticket, staff_name: str, ga_name: str) -> dict:
     staff = approvers.get(staff_name)
     if not staff:
         raise ValueError(f"{staff_name} isn't on the approvers list.")
-    emailed = send_staff_approval_email(staff, t)
+    token = tokens.issue_staff_approval_link(db, t.id, staff.name)
+    link = f"{settings.PUBLIC_BASE_URL}/approve/{t.id}?t={token}"
+    emailed = send_staff_approval_email(staff, t, link)
     db.add(ApprovalLog(ticket_id=t.id, resource_id=(t.task or {}).get("resource_id", ""),
                        actor=ga_name, action="asked_staff", reason=staff.name))
     db.commit()
-    return {"link": approval_url(t.id), "emailed": emailed, "staff_email": staff.email}
+    return {"link": link, "emailed": emailed, "staff_email": staff.email}

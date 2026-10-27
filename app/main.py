@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from . import approvals, directory, inventory, knowledge, llm, schedule, storage, teams, tickets
+from . import approvals, directory, inventory, knowledge, llm, schedule, storage, teams, tickets, tokens
 from .config import BASE_DIR, load_team, settings
 from .db import (ApprovalLog, ChatSession, Doc, Item, Message, Person, QueryLog, SessionLocal, TaskFile,
                  Ticket, get_today_note, init_db, set_today_note, utcnow)
@@ -76,6 +76,35 @@ def ticket_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | N
         _eq(x_ga_key, settings.ADMIN_PASSWORD)
     if not ok:
         raise HTTPException(401, "This link is not valid")
+
+
+def _staff_or_ga_key(x_ga_key: str | None) -> bool:
+    return _eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD)
+
+
+def status_token_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None)):
+    if _staff_or_ga_key(x_ga_key):
+        return
+    if not tokens.verify_token(t, "status", ticket_id):
+        raise HTTPException(401, "This link is not valid")
+
+
+def download_token_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None)):
+    if _staff_or_ga_key(x_ga_key):
+        return
+    if not tokens.verify_token(t, "download", ticket_id):
+        raise HTTPException(401, "This link is not valid")
+
+
+def staff_approve_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None),
+                         db=Depends(get_db)):
+    """GET-safe: only checks the link is currently valid (right purpose/ticket, signature
+    intact, not expired, not already used). Never marks it used - the route itself does
+    that, and only once a decision is actually submitted."""
+    if _staff_or_ga_key(x_ga_key):
+        return
+    if not t or not tokens.check_staff_link(db, t, ticket_id):
+        raise HTTPException(401, "This link isn't valid - it may have already been used or expired.")
 
 
 # ---------------- pages ----------------
@@ -604,13 +633,16 @@ def _status_json(t: Ticket) -> dict:
     if t.kind == "approval":
         handoff = (t.task or {}).get("handoff_method")
         downloadable = (t.status == "done" and handoff == "digital" and t.resolved_at is not None
-                       and utcnow() - t.resolved_at <= timedelta(hours=24))
+                       and utcnow() - t.resolved_at <= timedelta(hours=tokens.DOWNLOAD_WINDOW_HOURS))
         out.update(resource_title=(t.task or {}).get("resource_title"), handoff_method=handoff,
                   downloadable=downloadable, decline_reason=t.cancelled_reason if t.status == "cancelled" else None)
+        if downloadable:
+            dl_token = tokens.download_token(t.id, t.resolved_at)
+            out["download_url"] = f"/api/status/{t.id}/download?t={dl_token}"
     return out
 
 
-@app.get("/api/status/{ticket_id}", dependencies=[Depends(ticket_access)])
+@app.get("/api/status/{ticket_id}", dependencies=[Depends(status_token_access)])
 def get_status(ticket_id: int, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t:
@@ -618,7 +650,7 @@ def get_status(ticket_id: int, db=Depends(get_db)):
     return _status_json(t)
 
 
-@app.post("/api/status/{ticket_id}/confirm", dependencies=[Depends(ticket_access)])
+@app.post("/api/status/{ticket_id}/confirm", dependencies=[Depends(status_token_access)])
 def confirm_status(ticket_id: int, body: StatusConfirmIn, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t:
@@ -631,7 +663,7 @@ def confirm_status(ticket_id: int, body: StatusConfirmIn, db=Depends(get_db)):
     return _status_json(t)
 
 
-@app.get("/api/status/{ticket_id}/download", dependencies=[Depends(ticket_access)])
+@app.get("/api/status/{ticket_id}/download", dependencies=[Depends(download_token_access)])
 def download_approval_file(ticket_id: int, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t or t.kind != "approval":
@@ -649,7 +681,7 @@ def download_approval_file(ticket_id: int, db=Depends(get_db)):
     return FileResponse(path, filename=path.name, media_type="application/pdf")
 
 
-@app.get("/api/approve/{ticket_id}", dependencies=[Depends(ticket_access)])
+@app.get("/api/approve/{ticket_id}", dependencies=[Depends(staff_approve_access)])
 def get_approval_ticket(ticket_id: int, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t or t.kind != "approval":
@@ -666,21 +698,24 @@ class StaffDecisionIn(BaseModel):
     reason: str | None = None
 
 
-@app.post("/api/approve/{ticket_id}", dependencies=[Depends(ticket_access)])
-def staff_decide(ticket_id: int, body: StaffDecisionIn, db=Depends(get_db)):
-    t = db.get(Ticket, ticket_id)
-    if not t or t.kind != "approval":
+@app.post("/api/approve/{ticket_id}", dependencies=[Depends(staff_approve_access)])
+def staff_decide(ticket_id: int, body: StaffDecisionIn, t: str | None = Query(None), db=Depends(get_db)):
+    tk = db.get(Ticket, ticket_id)
+    if not tk or tk.kind != "approval":
         raise HTTPException(404)
-    if t.status not in tickets.OPEN_STATUSES:
+    if tk.status not in tickets.OPEN_STATUSES:
         raise HTTPException(409, "This request has already been decided.")
     if body.decision not in ("approved", "declined"):
         raise HTTPException(400, "Unknown decision.")
-    staff_name = approvals.get_asked_staff_name(db, t) or "Staff approver"
+    staff_name = approvals.get_asked_staff_name(db, tk) or "Staff approver"
     try:
-        tickets.apply_approval_decision(db, t, staff_name, body.decision, body.reason)
+        tickets.apply_approval_decision(db, tk, staff_name, body.decision, body.reason)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"status": t.status}
+    link = tokens.check_staff_link(db, t, ticket_id) if t else None
+    if link:
+        tokens.consume_staff_link(db, link)
+    return {"status": tk.status}
 
 
 @app.post("/api/ga/ticket/{ticket_id}/claim", dependencies=[Depends(ticket_access)])

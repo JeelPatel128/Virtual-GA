@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
 
-from . import schedule, storage, teams
+from . import schedule, storage, teams, tokens
 from .config import lead_ga, load_team, settings
 from .db import (ApprovalLog, ChatSession, Item, Message, QueryLog, ReminderLog, TaskFile, Ticket,
                  get_today_note, kv_get, kv_set, utcnow)
@@ -448,7 +448,7 @@ def confirm_reached(db, t: Ticket, reached: bool) -> None:
 
 
 def status_url(ticket_id: int) -> str:
-    return f"{settings.PUBLIC_BASE_URL}/status/{ticket_id}?t={ticket_token(ticket_id)}"
+    return f"{settings.PUBLIC_BASE_URL}/status/{ticket_id}?t={tokens.status_token(ticket_id)}"
 
 
 def send_requester_confirmation_email(t: Ticket) -> None:

@@ -148,6 +148,23 @@
         <textarea id="approversList" rows="3"></textarea>
         <button class="btn" style="margin-top:10px">Save</button><div class="msgline" id="approversMsg"></div></form>
       <div class="card"><h2>Approval log</h2><div id="approvalLog">Loading...</div></div>
+      <form class="card" id="retentionForm"><h2>Data retention</h2>
+        <p class="hint">Preview mode (default): every day this logs what it WOULD anonymize or delete,
+        without changing anything. Turn "Enable retention" on once you've checked a preview and are
+        happy with it - after that it's real.</p>
+        <label class="check"><input type="checkbox" id="retentionEnabled"> Enable retention (off = preview only)</label>
+        <table style="margin-top:8px">
+          <tr><td>Visitor name/email (non-approval tickets)</td><td><input type="number" id="rdVisitor" min="1" style="width:70px"> days</td></tr>
+          <tr><td>Approval-request visitor name/email</td><td><input type="number" id="rdApproval" min="1" style="width:70px"> days</td></tr>
+          <tr><td>Question log text (rolled into topic counts)</td><td><input type="number" id="rdQueryLog" min="1" style="width:70px"> days</td></tr>
+          <tr><td>Phone numbers</td><td><input type="number" id="rdPhone" min="1" style="width:70px"> days</td></tr>
+          <tr><td>Task file attachments</td><td><input type="number" id="rdFile" min="1" style="width:70px"> days</td></tr>
+        </table>
+        <div class="btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn">Save</button>
+          <button class="btn quiet" type="button" id="runRetention">Run preview now</button>
+        </div><div class="msgline" id="retentionMsg"></div>
+        <div id="retentionReport" style="margin-top:12px"></div></form>
       <div class="card"><h2>QR code for the desk</h2>
         <p class="hint">Print this and put it on the front desk.</p>
         <img src="/qr.png" alt="QR code for the Virtual GA" style="width:200px;height:200px;background:#fff;padding:8px;border-radius:12px">
@@ -344,11 +361,50 @@ async function loadSetup() {
     log.entries.map(e => `<tr><td>${esc(e.at)}</td><td>#${e.ticket_id}</td><td>${esc(e.resource_id)}</td>
     <td>${esc(e.actor)}</td><td>${esc(e.action)}</td><td>${esc(e.reason || "")}</td></tr>`).join("")}</table>`
     : '<p class="hint">No approval activity yet.</p>';
+  await loadRetention();
+}
+
+function renderRetentionReport(r) {
+  if (!r) { $("retentionReport").innerHTML = '<p class="hint">No run yet - it runs automatically once a day, or click "Run preview now".</p>'; return; }
+  const st = r.tables.sessions_tickets, ql = r.tables.query_log;
+  $("retentionReport").innerHTML = `<p class="hint">Last run ${esc(r.at)} - ${r.applied ? "<b>applied for real</b>" : "<b>preview only, nothing changed</b>"}.</p>
+    <table>
+      <tr><th>Table</th><th>Would affect</th><th>Examples</th></tr>
+      <tr><td>Sessions/tickets (name/email)</td><td>${st.count}</td><td class="hint">${
+        st.examples.map(e => `#${e.ticket_id} ${esc(e.kind)}: ${esc(e.name)}${e.email ? " + email" : ""}`).join("<br>") || "none"}</td></tr>
+      <tr><td>Question log -> topic counts</td><td>${ql.count}</td><td class="hint">${
+        ql.examples.map(e => `${esc(e.category)}: "${esc(e.question)}"`).join("<br>") || "none"}</td></tr>
+    </table>`;
+}
+async function loadRetention() {
+  const r = await api("/api/admin/retention");
+  $("retentionEnabled").checked = r.enabled;
+  $("rdVisitor").value = r.periods.visitor_days;
+  $("rdApproval").value = r.periods.approval_log_days;
+  $("rdQueryLog").value = r.periods.query_log_days;
+  $("rdPhone").value = r.periods.phone_days;
+  $("rdFile").value = r.periods.file_days;
+  renderRetentionReport(r.last_report);
 }
 $("testTeams").onclick = async () => { const r = await api("/api/admin/test-teams", { method: "POST" });
   flash("setupMsg", r.sent ? "Sent. Check the Teams channel." : (r.webhook_configured ? "Teams rejected it. Check the server log." : "Set TEAMS_WEBHOOK_URL first."), !r.sent); };
 $("reembed").onclick = async () => { try { const r = await api("/api/admin/reembed", { method: "POST" }); flash("setupMsg", `Re-indexed ${r.embedded} chunks.`); } catch (er) { flash("setupMsg", er.message, true); } };
 $("showExtensions").onchange = async (e) => { try { await api("/api/admin/settings", { method: "POST", body: JSON.stringify({ show_extensions: e.target.checked }) }); flash("extMsg", "Saved"); } catch (er) { flash("extMsg", er.message, true); } };
+$("retentionForm").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/admin/retention", { method: "POST", body: JSON.stringify({
+      enabled: $("retentionEnabled").checked,
+      visitor_days: +$("rdVisitor").value, approval_log_days: +$("rdApproval").value,
+      query_log_days: +$("rdQueryLog").value, phone_days: +$("rdPhone").value, file_days: +$("rdFile").value,
+    }) });
+    flash("retentionMsg", "Saved");
+  } catch (er) { flash("retentionMsg", er.message, true); }
+};
+$("runRetention").onclick = async () => {
+  try { const r = await api("/api/admin/retention/run", { method: "POST" }); renderRetentionReport(r); flash("retentionMsg", "Done"); }
+  catch (er) { flash("retentionMsg", er.message, true); }
+};
 $("approversForm").onsubmit = async (e) => {
   e.preventDefault();
   const names = $("approversList").value.split("\n").map(n => n.trim()).filter(Boolean);

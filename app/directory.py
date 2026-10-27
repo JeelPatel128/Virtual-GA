@@ -497,9 +497,14 @@ def resolve(db, sess, text: str) -> dict | None:
     means "couldn't find them, offer a GA" rather than silently falling through."""
     # 0. place lookups have their own vocabulary (lounge, washroom, room 4xx, ...) and run
     # independently of the person-ish gating below.
+    # Every return path below is tagged with a retention-job topic category (see
+    # app/retention.py / QueryLog.category) - "Places" for a room/location lookup,
+    # "People & offices" for everything else here (a name, pronoun, or role match).
     place_hits = _place_candidates(db, text)
     if place_hits:
-        return _format_place_answer(place_hits[0][0])
+        result = _format_place_answer(place_hits[0][0])
+        result["meta"]["category"] = "Places"
+        return result
 
     # 1. exact/fuzzy name or alias match
     name_hits = _name_candidates(db, text)
@@ -507,7 +512,9 @@ def resolve(db, sess, text: str) -> dict | None:
     if strong:
         top_score = strong[0][1]
         tied = [p for p, score, _ in strong if top_score - score <= TIE_MARGIN]
-        return _disambiguate_or_resolve(db, sess, text, tied)
+        result = _disambiguate_or_resolve(db, sess, text, tied)
+        result["meta"]["category"] = "People & offices"
+        return result
 
     # 2. a pronoun with no new name/role signal refers back to whoever was last resolved
     # in this session ("is she in?", "what's his extension?"). A re-import can delete-and-
@@ -515,7 +522,9 @@ def resolve(db, sess, text: str) -> dict | None:
     if PRONOUN_RE.search(text) and sess.last_person_id:
         person = db.get(Person, sess.last_person_id)
         if person is not None and person.active:
-            return _format_person_answer(person, text, get_show_extensions(db))
+            result = _format_person_answer(person, text, get_show_extensions(db))
+            result["meta"]["category"] = "People & offices"
+            return result
         sess.last_person_id = None
 
     # 3. role match ("my grad advisor", "COPA person", "Capstone", "PhD forms", "the Dean").
@@ -527,16 +536,23 @@ def resolve(db, sess, text: str) -> dict | None:
         top_score = role_hits[0][1]
         tied = {p.id: p for p, score in role_hits if top_score - score <= TIE_MARGIN}
         if len(tied) > 1:
-            return _format_role_group_answer(list(tied.values()))
-        person = next(iter(tied.values()))
-        sess.last_person_id = person.id
-        return _format_person_answer(person, text, get_show_extensions(db))
+            result = _format_role_group_answer(list(tied.values()))
+        else:
+            person = next(iter(tied.values()))
+            sess.last_person_id = person.id
+            result = _format_person_answer(person, text, get_show_extensions(db))
+        result["meta"]["category"] = "People & offices"
+        return result
 
     # Nothing credible: only treat this as a person question (and refuse to silently fall
     # through) if the text actually looks person-ish. Otherwise a merely coincidental weak
     # fuzzy overlap (e.g. a long sentence sharing a few letters with someone's name) must
     # not hijack an unrelated question into a false "couldn't find them" response.
-    return _not_found_answer() if _looks_person_ish(text) else None
+    if _looks_person_ish(text):
+        result = _not_found_answer()
+        result["meta"]["category"] = "People & offices"
+        return result
+    return None
 
 
 def resolve_choice(db, sess, person_id: int) -> dict:
@@ -546,9 +562,13 @@ def resolve_choice(db, sess, person_id: int) -> dict:
     sess.pending_query = None
     sess.pending_choices = None
     if person_id not in offered:
-        return {"answer": "That wasn't one of the options I offered. Could you ask again?", "meta": {}}
+        return {"answer": "That wasn't one of the options I offered. Could you ask again?",
+                "meta": {"category": "People & offices"}}
     person = db.get(Person, person_id)
     if person is None or not person.active:
-        return _not_found_answer()
-    sess.last_person_id = person.id
-    return _format_person_answer(person, query, get_show_extensions(db))
+        result = _not_found_answer()
+    else:
+        sess.last_person_id = person.id
+        result = _format_person_answer(person, query, get_show_extensions(db))
+    result["meta"]["category"] = "People & offices"
+    return result

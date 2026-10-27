@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
 
-from . import schedule, storage, teams, tokens
+from . import retention, schedule, storage, teams, tokens
 from .config import lead_ga, load_team, settings
 from .db import (ApprovalLog, ChatSession, Item, Message, QueryLog, ReminderLog, TaskFile, Ticket,
                  get_today_note, kv_get, kv_set, utcnow)
@@ -404,10 +404,11 @@ def _clear_task_file(db, t: Ticket) -> None:
     t.file_backend = t.file_ref = None
 
 
-def purge_old_task_files(db, days: int = 14) -> int:
-    """Backstop sweep: clear any task attachment older than `days` regardless of status,
-    in case a ticket is left open indefinitely."""
-    cutoff = utcnow() - timedelta(days=days)
+def purge_old_task_files(db, days: int | None = None) -> int:
+    """Backstop sweep: clear any task attachment older than `days` (an admin-settable
+    retention period, see app/retention.py, default 14) regardless of status, in case a
+    ticket is left open indefinitely."""
+    cutoff = utcnow() - timedelta(days=days if days is not None else retention.DEFAULT_FILE_DAYS)
     rows = db.scalars(select(Ticket).where(Ticket.file_backend.is_not(None),
                                            Ticket.created_at < cutoff)).all()
     for t in rows:
@@ -552,8 +553,10 @@ def check_reminders(db) -> int:
     return fired
 
 
-def purge_old_phone_numbers(db) -> int:
-    cutoff = utcnow() - timedelta(days=settings.PHONE_RETENTION_DAYS)
+def purge_old_phone_numbers(db, days: int | None = None) -> int:
+    """`days` is an admin-settable retention period, see app/retention.py, default
+    PHONE_RETENTION_DAYS."""
+    cutoff = utcnow() - timedelta(days=days if days is not None else settings.PHONE_RETENTION_DAYS)
     rows = db.scalars(select(ChatSession).where(ChatSession.visitor_phone.is_not(None),
                                                 ChatSession.created_at < cutoff)).all()
     for s in rows:
@@ -845,7 +848,7 @@ def check_shift_starts(db) -> int:
 
 def tick(db) -> dict:
     result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0, "task_files_purged": 0,
-              "weekly_report_sent": False}
+              "weekly_report_sent": False, "retention": None}
     result["shift_ends_handled"] = check_shift_ends(db)
     result["shift_starts_handled"] = check_shift_starts(db)
     result["task_headsups_sent"] = check_task_heads_up(db)
@@ -855,9 +858,11 @@ def tick(db) -> dict:
         send_digest(db, now)
         kv_set(db, "digest_date", today)
         result["digest_sent"] = True
-        result["phones_purged"] = purge_old_phone_numbers(db)  # once a day is plenty
-        result["task_files_purged"] = purge_old_task_files(db)  # once a day is plenty
+        periods = retention.get_periods(db)
+        result["phones_purged"] = purge_old_phone_numbers(db, days=periods["phone_days"])  # once a day is plenty
+        result["task_files_purged"] = purge_old_task_files(db, days=periods["file_days"])  # once a day is plenty
         result["weekly_report_sent"] = maybe_send_weekly_report(db, now)
+        result["retention"] = retention.run(db)
         db.commit()
     return result
 

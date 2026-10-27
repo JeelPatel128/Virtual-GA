@@ -325,6 +325,6 @@ def search(db, query: str, k: int = 5, visitor: bool = True) -> list[dict]:
     results.sort(key=lambda r: r[0], reverse=True)
     return [
         {"id": c.id, "doc_id": d.id, "title": d.title, "kind": d.kind, "text": c.text,
-         "score": round(s, 3), "method": method, "faq_type": d.faq_type}
+         "score": round(s, 3), "method": method, "faq_type": d.faq_type, "category": d.category}
         for s, c, d in results[:k] if s > 0
     ]

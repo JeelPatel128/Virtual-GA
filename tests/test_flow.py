@@ -83,6 +83,10 @@ def test_migration_adds_columns_to_old_tables():
             id INTEGER PRIMARY KEY, title TEXT, kind TEXT, extracted_text TEXT,
             image_bytes BLOB, mime TEXT, added_by TEXT, created_at TIMESTAMP
         );
+        CREATE TABLE query_log (
+            id INTEGER PRIMARY KEY, session_id TEXT, question TEXT, confident BOOLEAN,
+            created_at TIMESTAMP
+        );
     """)
     con.commit(); con.close()
 
@@ -93,6 +97,7 @@ def test_migration_adds_columns_to_old_tables():
         session_cols = db_module._existing_columns(conn, "sessions")
         ticket_cols = db_module._existing_columns(conn, "tickets")
         doc_cols = db_module._existing_columns(conn, "docs")
+        query_log_cols = db_module._existing_columns(conn, "query_log")
     assert {"last_person_id", "pending_query", "pending_choices"} <= session_cols
     assert {"kind", "recipient_person_id", "deadline_at"} <= ticket_cols
     assert {"owner", "owner_history", "activity", "next_deadline", "last_reminder_step",
@@ -102,6 +107,7 @@ def test_migration_adds_columns_to_old_tables():
     assert {"external_id", "category", "faq_type", "variants", "asked_by", "times_mentioned",
            "source", "handled_by", "changes_each_semester", "status"} <= doc_cols
     assert {"audience", "seasonal", "linked_faq_ids", "source_file"} <= doc_cols
+    assert "category" in query_log_cols
     eng.dispose()
 
 
@@ -422,6 +428,15 @@ def test_today_note_expiry_ga_endpoints_and_ask_shortcircuit():
         last = c.get(f"/api/session/{sid}/messages").json()["messages"][-1]
         assert last["text"] == "Room 203 closed for cleaning today"
 
+        # retention job's topic category: "today at SSB" is bucketed as "Places"
+        db = SessionLocal()
+        from sqlalchemy import select
+        from app.db import QueryLog as _QueryLog
+        latest = db.scalars(select(_QueryLog).where(_QueryLog.session_id == sid)
+                            .order_by(_QueryLog.id.desc())).first()
+        assert latest.category == "Places"
+        db.close()
+
         # clear it: the bot falls back to a plain "nothing special" default
         c.post("/api/ga/today-note", headers=GA, json={"text": ""})
         sid2 = c.post("/api/session").json()["session_id"]
@@ -475,6 +490,14 @@ def test_inventory_import_matching_borrow_and_ga_search():
         last = _ask_text(c, sid, "do you have pens")
         assert last["text"] == "Yes, ask the GA at the front desk."
         assert "borrow_item_id" not in last["meta"]
+
+        # retention job's topic category: an inventory answer is always "Supplies"
+        db = SessionLocal()
+        from app.db import QueryLog as _QueryLog
+        latest = db.scalars(select(_QueryLog).where(_QueryLog.session_id == sid)
+                            .order_by(_QueryLog.id.desc())).first()
+        assert latest.category == "Supplies"
+        db.close()
 
         # ga_only -> never reveals real stock, offers a GA instead of "we're out"
         last = _ask_text(c, sid, "do you have toner")
@@ -648,6 +671,15 @@ def test_approval_gated_resource_request_flow():
             assert "test-approval-fixture" not in last["text"], (phrase, last["text"])
             assert last["meta"].get("offer_approval_request") is True, (phrase, last)
             assert last["meta"]["resource_id"] == "TRES-APR"
+
+        # retention job's topic category: this fixture resource has no category column
+        # set, so it falls back to "Unanswered" (same bucket as a true non-match)
+        db = SessionLocal()
+        from app.db import QueryLog as _QueryLog
+        latest = db.scalars(select(_QueryLog).where(_QueryLog.session_id == sid)
+                            .order_by(_QueryLog.id.desc())).first()
+        assert latest.category == "Unanswered"
+        db.close()
 
         # mentioning a completed/filled-in form is refused, not offered
         sid0 = c.post("/api/session").json()["session_id"]
@@ -934,6 +966,123 @@ def test_rls_is_a_postgres_only_noop_in_sqlite_tests():
         s = c.get("/api/admin/status", headers=A).json()
         assert s["tables_without_rls"] == []
     print("RLS postgres-only no-op test passed")
+
+
+def test_retention_preview_mode_and_real_anonymization():
+    """app/retention.py - preview mode (the default) only ever reports counts/examples
+    and never mutates; enabling it makes those same counts real. Approval-kind tickets
+    get the longer approval_log_days window, not the shorter visitor_days one, so a
+    180-day-old approval request's identity must survive a run that already anonymized
+    an equally old plain ticket."""
+    from sqlalchemy import select
+    from app import retention
+    from app.db import KV, ChatSession, QueryLog, TopicCount, utcnow
+
+    with TestClient(app) as c:
+        db = SessionLocal()
+        try:
+            # make sure a stale enabled flag/periods from another test run don't leak in
+            for key in ("retention_enabled", "retention_visitor_days", "retention_query_log_days",
+                       "retention_approval_log_days", "retention_phone_days", "retention_file_days",
+                       "retention_last_report"):
+                row = db.get(KV, key)
+                if row:
+                    db.delete(row)
+            db.commit()
+
+            old = utcnow() - timedelta(days=200)  # past the 180-day default, short of 365
+            sess_plain = ChatSession(visitor_name="Alex Student", created_at=old)
+            db.add(sess_plain); db.flush()
+            sid_plain = sess_plain.id
+            t_plain = Ticket(session_id=sid_plain, question="task ticket", kind="task", status="done",
+                             created_at=old, requester_email="alex@stevens.edu")
+            db.add(t_plain)
+
+            sess_appr = ChatSession(visitor_name="Bo Student", created_at=old)
+            db.add(sess_appr); db.flush()
+            sid_appr = sess_appr.id
+            t_appr = Ticket(session_id=sid_appr, question="approval ticket", kind="approval", status="done",
+                            created_at=old, requester_email="bo@stevens.edu")
+            db.add(t_appr)
+
+            ql_old1 = QueryLog(session_id=sid_plain, question="where is the copier", confident=True,
+                               category="Supplies", created_at=old)
+            ql_old2 = QueryLog(session_id=sid_plain, question="where is the copier again", confident=True,
+                               category="Supplies", created_at=old)
+            ql_old_unanswered = QueryLog(session_id=sid_plain, question="something odd", confident=False,
+                                        category=None, created_at=old)
+            ql_recent = QueryLog(session_id=sid_plain, question="recent question", confident=True,
+                                 category="Supplies", created_at=utcnow())
+            db.add_all([ql_old1, ql_old2, ql_old_unanswered, ql_recent])
+            db.commit()
+            t_plain_id, t_appr_id = t_plain.id, t_appr.id
+
+            # --- preview (retention off by default): reports, changes nothing ---
+            assert retention.enabled(db) is False
+            report = retention.run(db)
+            assert report["applied"] is False
+            assert report["tables"]["sessions_tickets"]["count"] == 1  # only the non-approval one, for now
+            assert report["tables"]["query_log"]["count"] == 3  # the 3 old ones, not the recent one
+
+            db.refresh(sess_plain); db.refresh(t_plain)
+            assert sess_plain.visitor_name == "Alex Student" and t_plain.requester_email == "alex@stevens.edu"
+            assert db.get(QueryLog, ql_old1.id) is not None
+            assert db.scalar(select(TopicCount).where(TopicCount.category == "Supplies")) is None
+            assert retention.last_report(db)["applied"] is False
+
+            # --- enable: the same run now actually anonymizes/rolls up ---
+            retention.set_enabled(db, True)
+            report2 = retention.run(db)
+            assert report2["applied"] is True
+
+            db.refresh(sess_plain); db.refresh(t_plain)
+            assert sess_plain.visitor_name == f"Visitor #{t_plain_id}"
+            assert t_plain.requester_email is None
+            # the approval ticket is untouched - 200 days is short of its 365-day window
+            db.refresh(sess_appr); db.refresh(t_appr)
+            assert sess_appr.visitor_name == "Bo Student" and t_appr.requester_email == "bo@stevens.edu"
+
+            assert db.get(QueryLog, ql_old1.id) is None and db.get(QueryLog, ql_recent.id) is not None
+            supplies = db.scalar(select(TopicCount).where(TopicCount.category == "Supplies",
+                                                           TopicCount.month == old.strftime("%Y-%m")))
+            assert supplies is not None and supplies.count == 2
+            unanswered = db.scalar(select(TopicCount).where(TopicCount.category == "Unanswered"))
+            assert unanswered is not None and unanswered.count == 1
+
+            # running again with nothing newly-overdue: 0/0, no double-counting
+            report3 = retention.run(db)
+            assert report3["tables"]["sessions_tickets"]["count"] == 0
+            assert report3["tables"]["query_log"]["count"] == 0
+            supplies2 = db.scalar(select(TopicCount).where(TopicCount.category == "Supplies",
+                                                            TopicCount.month == old.strftime("%Y-%m")))
+            assert supplies2.count == 2  # unchanged, not re-incremented
+
+            # --- past the approval window too: now it gets anonymized ---
+            t_appr.created_at = utcnow() - timedelta(days=400)
+            db.commit()
+            retention.run(db)
+            db.refresh(sess_appr); db.refresh(t_appr)
+            assert sess_appr.visitor_name == f"Visitor #{t_appr_id}"
+            assert t_appr.requester_email is None
+
+            db.delete(t_plain); db.delete(t_appr); db.delete(sess_plain); db.delete(sess_appr)
+            db.delete(ql_recent); db.commit()
+        finally:
+            db.close()
+
+        # --- admin endpoints ---
+        r = c.get("/api/admin/retention", headers=A).json()
+        assert r["enabled"] is True and r["periods"]["visitor_days"] == retention.DEFAULT_VISITOR_DAYS
+        r2 = c.post("/api/admin/retention", headers=A,
+                   json={"enabled": False, "visitor_days": 90}).json()
+        assert r2["enabled"] is False and r2["periods"]["visitor_days"] == 90
+        r3 = c.post("/api/admin/retention/run", headers=A).json()
+        assert r3["applied"] is False  # disabled again above
+
+        db = SessionLocal()
+        retention.set_periods(db, visitor_days=retention.DEFAULT_VISITOR_DAYS)  # restore for later tests
+        db.close()
+    print("retention preview/apply test passed")
 
 
 def test_storage_module_degrades_and_builds_correct_requests():
@@ -1309,6 +1458,17 @@ def test_faq_bulk_import():
         assert "2nd floor now" in rows[0].extracted_text
         db.close()
 
+        # retention job's topic category: a confident FAQ answer keeps that doc's own
+        # category (P1's "Printing"), not a fixed label
+        sid_p1 = c.post("/api/session").json()["session_id"]
+        _ask_text(c, sid_p1, "Where can I print")
+        db = SessionLocal()
+        from app.db import QueryLog as _QueryLog
+        latest_p1 = db.scalars(select(_QueryLog).where(_QueryLog.session_id == sid_p1)
+                               .order_by(_QueryLog.id.desc())).first()
+        assert latest_p1.category == "Printing"
+        db.close()
+
         # Task-type redirect: a top hit with faq_type "Task" above the score threshold
         # offers the task-request form instead of answering normally
         sid = c.post("/api/session").json()["session_id"]
@@ -1316,9 +1476,25 @@ def test_faq_bulk_import():
         assert last["meta"].get("offer_task_form") is True
         assert "Request something from the GAs" in last["text"]
 
+        # retention job's topic category: the redirect still carries the matched doc's
+        # own FAQ category (T1's "Tasks"), not a fixed label
+        db = SessionLocal()
+        from app.db import QueryLog as _QueryLog
+        latest = db.scalars(select(_QueryLog).where(_QueryLog.session_id == sid)
+                            .order_by(_QueryLog.id.desc())).first()
+        assert latest.category == "Tasks"
+        db.close()
+
         # an unrelated question never gets redirected just because *some* Task doc exists
         last2 = _ask_text(c, sid, "where is the nearest vending machine")
         assert not last2["meta"].get("offer_task_form")
+
+        # and a true non-match falls back to "Unanswered"
+        db = SessionLocal()
+        latest2 = db.scalars(select(_QueryLog).where(_QueryLog.session_id == sid)
+                             .order_by(_QueryLog.id.desc())).first()
+        assert latest2.category == "Unanswered"
+        db.close()
 
         # Edit button: updating an existing Q&A in place, not creating a duplicate
         qa_id = c.post("/api/admin/qa", headers=A,
@@ -1500,6 +1676,16 @@ def test_directory_name_matching_and_building_formats():
         last = _ask_text(c, sid, "is Professor Nguyen in today")
         assert last["meta"].get("offer_handoff") is True, last
         assert "couldn't find" in last["text"].lower(), last
+
+        # retention job's topic category: every directory (person) answer above,
+        # including the "couldn't find them" case, is "People & offices"
+        db = SessionLocal()
+        from sqlalchemy import select
+        from app.db import QueryLog as _QueryLog
+        latest = db.scalars(select(_QueryLog).where(_QueryLog.session_id == sid)
+                            .order_by(_QueryLog.id.desc())).first()
+        assert latest.category == "People & offices"
+        db.close()
     print("directory name matching + building formats test passed")
 
 
@@ -1688,6 +1874,15 @@ def test_place_matching():
 
         last = _ask_text(c, sid, "433 offices")
         assert "433 offices are the block" in last["text"], last
+
+        # retention job's topic category: a room/place lookup is always "Places"
+        db = SessionLocal()
+        from sqlalchemy import select
+        from app.db import QueryLog as _QueryLog
+        latest = db.scalars(select(_QueryLog).where(_QueryLog.session_id == sid)
+                            .order_by(_QueryLog.id.desc())).first()
+        assert latest.category == "Places"
+        db.close()
     print("place matching test passed")
 
 
@@ -2097,6 +2292,7 @@ if __name__ == "__main__":
     test_approval_gated_resource_request_flow()
     test_database_safety_guard()
     test_rls_is_a_postgres_only_noop_in_sqlite_tests()
+    test_retention_preview_mode_and_real_anonymization()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

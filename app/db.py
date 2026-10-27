@@ -203,13 +203,30 @@ class StaffApprovalLink(Base):
 
 
 class QueryLog(Base):
-    """Every question asked to the bot, for the daily digest and the 'questions to add' list."""
+    """Every question asked to the bot, for the daily digest and the 'questions to add' list.
+    Deleted by the retention job once past its window (see app/retention.py) - category is
+    kept, folded into TopicCount, first."""
     __tablename__ = "query_log"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     session_id: Mapped[str] = mapped_column(String(36), index=True)
     question: Mapped[str] = mapped_column(Text)
     confident: Mapped[bool] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    # Migrated onto the existing table, see _ensure_columns. Whatever answered the question:
+    # an FAQ Doc's own category, "People & offices"/"Places" (directory), "Supplies"
+    # (inventory), or "Unanswered" if nothing matched or the matching Doc has none set.
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class TopicCount(Base):
+    """Retention-job output (app/retention.py): once a QueryLog row's text passes its
+    retention window, it's deleted and folded in here instead - a category/month count,
+    never the question text or anything visitor-identifying."""
+    __tablename__ = "topic_counts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    category: Mapped[str] = mapped_column(String(100), index=True)
+    month: Mapped[str] = mapped_column(String(7), index=True)  # "YYYY-MM"
+    count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class KV(Base):
@@ -333,6 +350,8 @@ _MIGRATIONS = [
     ("docs", "seasonal", "BOOLEAN"),
     ("docs", "linked_faq_ids", "JSON"),
     ("docs", "source_file", "TEXT"),
+    # Security and data retention
+    ("query_log", "category", "TEXT"),
 ]
 
 

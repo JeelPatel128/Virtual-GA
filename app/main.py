@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from . import approvals, directory, inventory, knowledge, llm, schedule, storage, teams, tickets, tokens
+from . import approvals, directory, inventory, knowledge, llm, retention, schedule, storage, teams, tickets, tokens
 from .config import BASE_DIR, load_team, settings
 from .db import (ApprovalLog, ChatSession, Doc, Item, Message, Person, QueryLog, SessionLocal, TaskFile,
                  Ticket, get_today_note, init_db, set_today_note, utcnow)
@@ -245,14 +245,19 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
 
     resolved = directory.resolve(db, sess, text)
     if resolved is not None:
-        tickets.say(db, sid, "bot", resolved["answer"], meta=resolved.get("meta", {}))
+        meta = resolved.get("meta", {})
+        tickets.say(db, sid, "bot", resolved["answer"], meta=meta)
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True,
+                        category=meta.get("category", "People & offices")))
         db.commit()
         return {"relayed": False}
 
     if TODAY_NOTE_RE.search(text):
         answer = get_today_note(db) or NO_TODAY_NOTE
         tickets.say(db, sid, "bot", answer)
-        db.add(QueryLog(session_id=sess.id, question=text, confident=True))
+        # "Today at SSB" is about what's happening at the front desk itself - closest of
+        # the named buckets to "Places", not a person/office or inventory lookup.
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True, category="Places"))
         db.commit()
         return {"relayed": False}
 
@@ -266,14 +271,14 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
                        "I can send directly. Want me to request a copy for you?",
                        meta={"offer_approval_request": True, "resource_id": resource.external_id,
                             "resource_title": resource.title})
-        db.add(QueryLog(session_id=sess.id, question=text, confident=True))
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True, category=resource.category or "Unanswered"))
         db.commit()
         return {"relayed": False}
 
     inv = inventory.visitor_answer(db, text)
     if inv is not None:
         tickets.say(db, sid, "bot", inv["answer"], meta=inv["meta"])
-        db.add(QueryLog(session_id=sess.id, question=text, confident=True))
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True, category="Supplies"))
         db.commit()
         return {"relayed": False}
 
@@ -297,7 +302,8 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
         log.info("Task-type redirect: question=%r matched doc=%r score=%.3f",
                  text, hits[0]["title"], hits[0]["score"])
         tickets.say(db, sid, "bot", TASK_REDIRECT_ANSWER, meta={"offer_task_form": True})
-        db.add(QueryLog(session_id=sess.id, question=text, confident=True))
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True,
+                        category=hits[0].get("category") or "Unanswered"))
         db.commit()
         return {"relayed": False}
 
@@ -324,7 +330,11 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
             "images": [f"/api/kb/image/{d}" for d in images],
             "offer_handoff": not result["confident"]}
     tickets.say(db, sid, "bot", result["answer"], meta=meta)
-    db.add(QueryLog(session_id=sess.id, question=text, confident=result["confident"]))
+    # Whichever Doc actually answered keeps its own FAQ category; if none did (or it has
+    # none set), the retention job's topic_counts bucket this under "Unanswered".
+    category = used[0].get("category") if used else None
+    db.add(QueryLog(session_id=sess.id, question=text, confident=result["confident"],
+                    category=category or "Unanswered"))
     db.commit()
     return {"relayed": False}
 
@@ -1010,6 +1020,38 @@ def get_settings(db=Depends(get_db)):
 def update_settings(body: SettingsIn, db=Depends(get_db)):
     directory.set_show_extensions(db, body.show_extensions)
     return {"show_extensions": body.show_extensions}
+
+
+class RetentionIn(BaseModel):
+    enabled: bool | None = None
+    visitor_days: int | None = None
+    query_log_days: int | None = None
+    approval_log_days: int | None = None
+    phone_days: int | None = None
+    file_days: int | None = None
+
+
+@app.get("/api/admin/retention", dependencies=[Depends(require_admin)])
+def get_retention(db=Depends(get_db)):
+    return {"enabled": retention.enabled(db), "periods": retention.get_periods(db),
+            "last_report": retention.last_report(db)}
+
+
+@app.post("/api/admin/retention", dependencies=[Depends(require_admin)])
+def update_retention(body: RetentionIn, db=Depends(get_db)):
+    if body.enabled is not None:
+        retention.set_enabled(db, body.enabled)
+    periods = body.model_dump(exclude={"enabled"}, exclude_none=True)
+    if periods:
+        retention.set_periods(db, **periods)
+    return {"enabled": retention.enabled(db), "periods": retention.get_periods(db)}
+
+
+@app.post("/api/admin/retention/run", dependencies=[Depends(require_admin)])
+def run_retention_now(db=Depends(get_db)):
+    """Runs immediately instead of waiting for the next daily tick - still only a
+    preview unless "Enable retention" is already on, same rule as the daily run."""
+    return retention.run(db)
 
 
 class ApproversIn(BaseModel):

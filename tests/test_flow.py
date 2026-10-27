@@ -736,6 +736,29 @@ def test_approval_gated_resource_request_flow():
         sid4 = c.post("/api/session").json()["session_id"]
         tid4 = c.post(f"/api/session/{sid4}/request-approval", json={
             "name": "Dee Student", "email": None, "department": "", "resource_id": "TRES-APR"}).json()["ticket_id"]
+
+        # a status, download, or staff token can't claim or act on a ticket in the GA
+        # console - those routes only accept a ga_action token (or the GA key)
+        bad_status_tok = tk.status_token(tid4)
+        assert c.post(f"/api/ga/ticket/{tid4}/claim?t={bad_status_tok}",
+                     json={"ga_name": "GA Two"}).status_code == 401
+        bad_dl_tok = tk.download_token(tid4, db_utcnow())
+        assert c.post(f"/api/ga/ticket/{tid4}/action?t={bad_dl_tok}",
+                     json={"ga_name": "GA Two", "action": "approve"}).status_code == 401
+        db = SessionLocal()
+        bad_staff_tok = tk.issue_staff_approval_link(db, tid4, "Test Approver")
+        db.close()
+        assert c.post(f"/api/ga/ticket/{tid4}/claim?t={bad_staff_tok}",
+                     json={"ga_name": "GA Two"}).status_code == 401
+        assert c.post(f"/api/ga/ticket/{tid4}/action?t={bad_staff_tok}",
+                     json={"ga_name": "GA Two", "action": "approve"}).status_code == 401
+        # a ga_action token minted for a DIFFERENT ticket also fails (cross-ticket)
+        other_ga_tok = tk.ga_action_token(tid4 + 1_000_000)
+        assert c.post(f"/api/ga/ticket/{tid4}/claim?t={other_ga_tok}",
+                     json={"ga_name": "GA Two"}).status_code == 401
+        # the ticket is still unclaimed after every rejected attempt above
+        assert c.get(f"/api/ga/ticket/{tid4}", headers=GA).json()["owner"] is None
+
         c.post(f"/api/ga/ticket/{tid4}/claim", headers=GA, json={"ga_name": "GA Two"})
         c.post(f"/api/ga/ticket/{tid4}/action", headers=GA, json={"ga_name": "GA Two", "action": "hand_in_person"})
         token4 = tk.status_token(tid4)
@@ -2011,7 +2034,8 @@ def test_full_flow():
         assert act({"action": "reply", "text": "late"}).status_code == 409
 
         # GA says busy on ticket 2 -> visitor asked for a number, then adds it
-        tok2 = tickets.ticket_token(tid2)
+        from app import tokens as _tok
+        tok2 = _tok.ga_action_token(tid2)
         c.post(f"/api/ga/ticket/{tid2}/action?t={tok2}",
               json={"ga_name": "Jeel Patel", "action": "busy", "snooze_until": "30min", "reason": "in a meeting"})
         assert "leave a phone number" in c.get(f"/api/session/{sid2}/messages").json()["messages"][-1]["text"]

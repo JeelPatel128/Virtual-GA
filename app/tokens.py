@@ -1,11 +1,12 @@
-"""Purpose-scoped signed links for ticket-related pages (status, an approved download,
-a staff approve/decline link). Replaces the single shared ticket_token() for these three
-surfaces - that one token worked interchangeably for all of them (and for GA-console
-actions), so a requester's own status link could, for example, also approve or decline
-their own ticket. Each token here is an HMAC over (purpose, ticket_id, expires_at, nonce),
-so a token minted for one purpose or one ticket is cryptographically rejected by any
-other. "staff_approve" is additionally single-use, tracked in StaffApprovalLink since a
-signature alone can't record "already spent" - see consume_staff_link."""
+"""Purpose-scoped signed links for every ticket-related page (requester status, an
+approved download, a staff approve/decline link, and the GA console itself). Replaces
+the single shared ticket_token() that used to work interchangeably for all of these -
+a requester's own status link could, for example, also approve or decline their own
+ticket, or claim it in the GA console. Each token here is an HMAC over
+(purpose, ticket_id, expires_at, nonce), so a token minted for one purpose or one ticket
+is cryptographically rejected by any other. "staff_approve" is additionally single-use,
+tracked in StaffApprovalLink since a signature alone can't record "already spent" - see
+consume_staff_link."""
 import hashlib
 import hmac
 import secrets
@@ -16,10 +17,11 @@ from sqlalchemy import select
 from .config import settings
 from .db import StaffApprovalLink, utcnow
 
-PURPOSES = ("status", "download", "staff_approve")
+PURPOSES = ("status", "download", "staff_approve", "ga_action")
 
 DOWNLOAD_WINDOW_HOURS = 24
 STAFF_APPROVE_WINDOW_HOURS = 72
+GA_ACTION_WINDOW_DAYS = 7
 
 
 def _sign(payload: str) -> str:
@@ -66,6 +68,13 @@ def status_token(ticket_id: int) -> str:
 
 def download_token(ticket_id: int, approved_at: datetime) -> str:
     return make_token("download", ticket_id, approved_at + timedelta(hours=DOWNLOAD_WINDOW_HOURS))
+
+
+def ga_action_token(ticket_id: int) -> str:
+    """The GA console's own ticket link (every Teams card's "Open and respond" button).
+    Expires after 7 days - long enough that an older card someone opens late still
+    works, short enough that a stale link doesn't stay valid forever."""
+    return make_token("ga_action", ticket_id, utcnow() + timedelta(days=GA_ACTION_WINDOW_DAYS))
 
 
 def issue_staff_approval_link(db, ticket_id: int, staff_name: str) -> str:

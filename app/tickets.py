@@ -1,6 +1,4 @@
 """Handoffs, GA responses, 5-minute escalation to the lead, the daily digest and data cleanup."""
-import hashlib
-import hmac
 import json
 import logging
 import smtplib
@@ -22,12 +20,8 @@ TZ = ZoneInfo(settings.TIMEZONE)
 OPEN_STATUSES = ("new", "claimed", "in_progress")
 
 
-def ticket_token(ticket_id: int) -> str:
-    return hmac.new(settings.SECRET_KEY.encode(), f"ticket:{ticket_id}".encode(), hashlib.sha256).hexdigest()[:24]
-
-
 def ticket_url(ticket_id: int) -> str:
-    return f"{settings.PUBLIC_BASE_URL}/ga/ticket/{ticket_id}?t={ticket_token(ticket_id)}"
+    return f"{settings.PUBLIC_BASE_URL}/ga/ticket/{ticket_id}?t={tokens.ga_action_token(ticket_id)}"
 
 
 def local(dt: datetime) -> datetime:

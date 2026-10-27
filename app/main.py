@@ -71,15 +71,19 @@ def require_ga(x_ga_key: str | None = Header(None)):
         raise HTTPException(401, "Wrong GA key")
 
 
-def ticket_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None)):
-    ok = _eq(t, tickets.ticket_token(ticket_id)) or _eq(x_ga_key, settings.GA_KEY) or \
-        _eq(x_ga_key, settings.ADMIN_PASSWORD)
-    if not ok:
-        raise HTTPException(401, "This link is not valid")
-
-
 def _staff_or_ga_key(x_ga_key: str | None) -> bool:
     return _eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD)
+
+
+def ga_action_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None)):
+    """The GA console's own ticket page and its claim/action/ask-staff/file endpoints -
+    reached from a Teams card's "Open and respond" link, which carries a 7-day
+    "ga_action"-purpose token. A status/download/staff_approve token (or anything else)
+    doesn't work here, same as this doesn't work on those routes."""
+    if _staff_or_ga_key(x_ga_key):
+        return
+    if not tokens.verify_token(t, "ga_action", ticket_id):
+        raise HTTPException(401, "This link is not valid")
 
 
 def status_token_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None)):
@@ -521,7 +525,7 @@ def _ticket_json(db, t: Ticket, full: bool) -> dict:
 @app.get("/api/ga/team")
 def ga_team(tid: int | None = None, t: str | None = None, x_ga_key: str | None = Header(None)):
     ok = _eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD) or \
-        (tid is not None and _eq(t, tickets.ticket_token(tid)))
+        (tid is not None and tokens.verify_token(t, "ga_action", tid))
     if not ok:
         raise HTTPException(401, "Wrong GA key")
     return {"names": [g.name for g in load_team()], "on_shift": [g.name for g in schedule.on_shift_now()]}
@@ -595,7 +599,7 @@ def ga_tickets(include_resolved: bool = False, db=Depends(get_db)):
     return {"tickets": [_ticket_json(db, t, False) for t in db.scalars(q).all()]}
 
 
-@app.get("/api/ga/ticket/{ticket_id}", dependencies=[Depends(ticket_access)])
+@app.get("/api/ga/ticket/{ticket_id}", dependencies=[Depends(ga_action_access)])
 def ga_ticket(ticket_id: int, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t:
@@ -603,7 +607,7 @@ def ga_ticket(ticket_id: int, db=Depends(get_db)):
     return _ticket_json(db, t, True)
 
 
-@app.get("/api/ga/ticket/{ticket_id}/file", dependencies=[Depends(ticket_access)])
+@app.get("/api/ga/ticket/{ticket_id}/file", dependencies=[Depends(ga_action_access)])
 def ga_ticket_file(ticket_id: int, db=Depends(get_db)):
     """The task's attached file - GA console only, never exposed to Teams. Bytes (for
     the local fallback) are only ever loaded here, not in any ticket-list/detail query."""
@@ -718,7 +722,7 @@ def staff_decide(ticket_id: int, body: StaffDecisionIn, t: str | None = Query(No
     return {"status": tk.status}
 
 
-@app.post("/api/ga/ticket/{ticket_id}/claim", dependencies=[Depends(ticket_access)])
+@app.post("/api/ga/ticket/{ticket_id}/claim", dependencies=[Depends(ga_action_access)])
 def ga_ticket_claim(ticket_id: int, body: ClaimIn, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t:
@@ -728,7 +732,7 @@ def ga_ticket_claim(ticket_id: int, body: ClaimIn, db=Depends(get_db)):
     return _ticket_json(db, db.get(Ticket, ticket_id), True)
 
 
-@app.post("/api/ga/ticket/{ticket_id}/action", dependencies=[Depends(ticket_access)])
+@app.post("/api/ga/ticket/{ticket_id}/action", dependencies=[Depends(ga_action_access)])
 def ga_ticket_action(ticket_id: int, body: ActionIn, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t:
@@ -748,7 +752,7 @@ class AskStaffIn(BaseModel):
     staff_name: str
 
 
-@app.post("/api/ga/ticket/{ticket_id}/ask-staff", dependencies=[Depends(ticket_access)])
+@app.post("/api/ga/ticket/{ticket_id}/ask-staff", dependencies=[Depends(ga_action_access)])
 def ga_ask_staff(ticket_id: int, body: AskStaffIn, db=Depends(get_db)):
     t = db.get(Ticket, ticket_id)
     if not t:

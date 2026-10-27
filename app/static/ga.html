@@ -116,7 +116,20 @@ async function ticketView(force) {
         <span>${t.owner ? `Owner: ${esc(t.owner)}` : "Unclaimed"}</span>
       </div>
       ${open && !t.owner ? `<div class="btns"><button class="btn" id="claimBtn">Claim</button></div>` : ""}
-      ${open && mine ? `<div class="btns">
+      ${open && mine && t.kind === "approval" ? `<div class="btns">
+        <button class="btn" data-a="approve">Approve</button>
+        <button class="btn quiet" data-a="hand_in_person">Hand in person</button>
+      </div>
+      <form id="declineForm" class="btns" style="margin-top:8px">
+        <input id="declineReason" placeholder="Reason to decline (required)" maxlength="500" required>
+        <button class="btn quiet">Decline</button>
+      </form>
+      <div class="btns" style="margin-top:8px">
+        <select id="staffPick" aria-label="Ask a staff approver"></select>
+        <button type="button" class="btn ghost" id="askStaffBtn">Ask staff to approve</button>
+      </div>
+      <div class="hint" id="askStaffMsg"></div>` : ""}
+      ${open && mine && t.kind !== "approval" ? `<div class="btns">
         <button class="btn" data-a="on_my_way" data-m="2">On my way (2 min)</button>
         <button class="btn" data-a="on_my_way" data-m="5">On my way (5 min)</button>
         <button class="btn ghost" data-a="on_my_way" data-m="10">10 min</button>
@@ -162,6 +175,28 @@ async function ticketView(force) {
       e.preventDefault();
       const reason = $("snoozeReason").value.trim(); if (!reason) return;
       act("busy", { snooze_until: $("snoozeUntil").value, reason });
+    };
+  }
+  if ($("declineForm")) {
+    $("declineForm").onsubmit = (e) => {
+      e.preventDefault();
+      const reason = $("declineReason").value.trim(); if (!reason) return;
+      act("decline", { reason });
+    };
+  }
+  if ($("staffPick")) {
+    api("/api/ga/approvers").then(d => {
+      $("staffPick").innerHTML = d.names.length ? d.names.map(n => `<option>${esc(n)}</option>`).join("")
+        : '<option value="">No approvers configured</option>';
+    });
+    $("askStaffBtn").onclick = async () => {
+      const staff_name = $("staffPick").value; if (!staff_name) return;
+      try {
+        const r = await api(`/api/ga/ticket/${ticketId}/ask-staff${q}`,
+          { method: "POST", body: JSON.stringify({ ga_name: me(), staff_name }) });
+        $("askStaffMsg").textContent = r.emailed ? `Emailed ${staff_name}.`
+          : `SMTP isn't set up - copy this link and send it yourself: ${r.link}`;
+      } catch (er) { $("askStaffMsg").textContent = er.message; }
     };
   }
 }

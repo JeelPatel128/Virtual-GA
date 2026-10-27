@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Approval request</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  body { display: flex; flex-direction: column; min-height: 100dvh; align-items: center; padding: 24px 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 20px;
+         max-width: 420px; width: 100%; }
+  .card h1 { font-size: 19px; margin: 0 0 4px; text-align: center; }
+  .row { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  .actions .btn { flex: 1; }
+  .thanks { font-size: 15px; margin-top: 6px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="card" id="card">Loading...</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const parts = location.pathname.split("/");
+const ticketId = parts[parts.length - 1];
+const token = new URLSearchParams(location.search).get("t") || "";
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || "Something went wrong");
+  return data;
+}
+
+function render(s) {
+  const card = $("card");
+  let html = `<h1>Approval request</h1>
+    <div class="row">Resource: ${s.resource_title || "Unknown"}</div>
+    <div class="row">Requested by: ${s.requested_by || "Not given"}${s.department ? " - " + s.department : ""}</div>
+    <div class="row">Requested: ${s.created_at}</div>`;
+  if (s.status === "done") {
+    html += `<p class="thanks">This request has already been approved.</p>`;
+  } else if (s.status === "cancelled") {
+    html += `<p class="thanks">This request was already declined${s.decline_reason ? ": " + s.decline_reason : ""}.</p>`;
+  } else {
+    html += `<p class="thanks">Approve or decline this request:</p>
+      <div class="actions"><button class="btn quiet" id="declineBtn">Decline</button><button class="btn" id="approveBtn">Approve</button></div>
+      <form id="declineForm" style="display:none;margin-top:12px">
+        <label for="reason">Reason for declining</label>
+        <textarea id="reason" rows="2" required maxlength="500"></textarea>
+        <div class="actions"><button type="button" class="btn quiet" id="cancelDecline">Back</button><button class="btn">Send decline</button></div>
+      </form>
+      <div class="err" id="err"></div>`;
+  }
+  card.innerHTML = html;
+  if (s.status !== "done" && s.status !== "cancelled") {
+    const decide = async (decision, reason) => {
+      try { render(await api(`/api/approve/${ticketId}?t=${encodeURIComponent(token)}`,
+                             { method: "POST", body: JSON.stringify({ decision, reason: reason || null }) })); }
+      catch (e) { $("err").textContent = e.message; }
+    };
+    $("approveBtn").onclick = () => decide("approved");
+    $("declineBtn").onclick = () => { $("declineForm").style.display = "block"; };
+    $("cancelDecline").onclick = () => { $("declineForm").style.display = "none"; };
+    $("declineForm").onsubmit = (e) => { e.preventDefault(); decide("declined", $("reason").value); };
+  }
+}
+
+api(`/api/approve/${ticketId}?t=${encodeURIComponent(token)}`)
+  .then(render)
+  .catch(e => { $("card").innerHTML = `<p class="err">${e.message}</p>`; });
+</script>
+</body>
+</html>

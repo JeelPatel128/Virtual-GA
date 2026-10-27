@@ -242,6 +242,7 @@ def upsert_resource_doc(db, row: dict) -> Doc:
         db.add(doc)
     doc.title, doc.kind, doc.extracted_text = row["title"][:300], kind, text
     doc.audience, doc.seasonal, doc.linked_faq_ids = row["audience"], row["seasonal"], row["faq_ids"]
+    doc.source_file = row["source_file"] or None
     db.flush()
     replace_chunks(db, doc, text)
     db.commit()
@@ -286,13 +287,15 @@ def _tokens(s: str) -> list[str]:
 
 
 def search(db, query: str, k: int = 5, visitor: bool = True) -> list[dict]:
-    """visitor=True (the default, used by the bot) excludes any Doc marked audience
-    "ga_only" or seasonal=True - a GA-resources-library doc the visitor bot must never
-    see. The admin "Test what it finds" tool and the GA console's own resource search
-    both pass visitor=False to see everything."""
+    """visitor=True (the default, used by the bot) only ever includes Doc rows marked
+    audience="public" - an allowlist, not a denylist, so "ga_only", "approval_required"
+    and any future restricted audience value are excluded from visitor-facing search
+    without needing to update this check. A seasonal=True doc is excluded the same way.
+    The admin "Test what it finds" tool and the GA console's own resource search both
+    pass visitor=False to see everything."""
     rows = db.execute(select(Chunk, Doc).join(Doc)).all()
     if visitor:
-        rows = [(c, d) for c, d in rows if d.audience != "ga_only" and not d.seasonal]
+        rows = [(c, d) for c, d in rows if d.audience == "public" and not d.seasonal]
     if not rows:
         return []
     results = []

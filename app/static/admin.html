@@ -142,6 +142,12 @@
       <div class="card"><h2>Directory</h2>
         <label class="check"><input type="checkbox" id="showExtensions"> Show extensions to visitors (always visible to GAs either way)</label>
         <div class="msgline" id="extMsg"></div></div>
+      <form class="card" id="approversForm"><h2>Approval-gated resource approvers</h2>
+        <p class="hint">Staff a GA can ask to approve a request (e.g. the ISSS employment form), one name per line.
+        Matched against the directory. They're never auto-notified or added to reminders.</p>
+        <textarea id="approversList" rows="3"></textarea>
+        <button class="btn" style="margin-top:10px">Save</button><div class="msgline" id="approversMsg"></div></form>
+      <div class="card"><h2>Approval log</h2><div id="approvalLog">Loading...</div></div>
       <div class="card"><h2>QR code for the desk</h2>
         <p class="hint">Print this and put it on the front desk.</p>
         <img src="/qr.png" alt="QR code for the Virtual GA" style="width:200px;height:200px;background:#fff;padding:8px;border-radius:12px">
@@ -328,11 +334,24 @@ async function loadSetup() {
     <p><b>Team:</b> ${s.team.map(g => esc(g.name) + (g.lead ? " (lead)" : "")).join(", ") || '<span class="no">team.json is empty</span>'}</p>`;
   const settings = await api("/api/admin/settings");
   $("showExtensions").checked = settings.show_extensions;
+  const approvers = await api("/api/admin/approvers");
+  $("approversList").value = approvers.names.join("\n");
+  const log = await api("/api/admin/approval-log");
+  $("approvalLog").innerHTML = log.entries.length ? `<table><tr><th>When</th><th>Ticket</th><th>Resource</th><th>Actor</th><th>Action</th><th>Reason</th></tr>${
+    log.entries.map(e => `<tr><td>${esc(e.at)}</td><td>#${e.ticket_id}</td><td>${esc(e.resource_id)}</td>
+    <td>${esc(e.actor)}</td><td>${esc(e.action)}</td><td>${esc(e.reason || "")}</td></tr>`).join("")}</table>`
+    : '<p class="hint">No approval activity yet.</p>';
 }
 $("testTeams").onclick = async () => { const r = await api("/api/admin/test-teams", { method: "POST" });
   flash("setupMsg", r.sent ? "Sent. Check the Teams channel." : (r.webhook_configured ? "Teams rejected it. Check the server log." : "Set TEAMS_WEBHOOK_URL first."), !r.sent); };
 $("reembed").onclick = async () => { try { const r = await api("/api/admin/reembed", { method: "POST" }); flash("setupMsg", `Re-indexed ${r.embedded} chunks.`); } catch (er) { flash("setupMsg", er.message, true); } };
 $("showExtensions").onchange = async (e) => { try { await api("/api/admin/settings", { method: "POST", body: JSON.stringify({ show_extensions: e.target.checked }) }); flash("extMsg", "Saved"); } catch (er) { flash("extMsg", er.message, true); } };
+$("approversForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const names = $("approversList").value.split("\n").map(n => n.trim()).filter(Boolean);
+  try { await api("/api/admin/approvers", { method: "POST", body: JSON.stringify({ names }) }); flash("approversMsg", "Saved"); }
+  catch (er) { flash("approversMsg", er.message, true); }
+};
 
 const loaders = { kb: loadDocs, directory: loadDirectory, sched: loadSched, digest: loadDigest, setup: loadSetup };
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {

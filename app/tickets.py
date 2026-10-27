@@ -12,8 +12,8 @@ from sqlalchemy import func, select, update
 
 from . import schedule, storage, teams
 from .config import lead_ga, load_team, settings
-from .db import (ChatSession, Item, Message, QueryLog, ReminderLog, TaskFile, Ticket, get_today_note,
-                 kv_get, kv_set, utcnow)
+from .db import (ApprovalLog, ChatSession, Item, Message, QueryLog, ReminderLog, TaskFile, Ticket,
+                 get_today_note, kv_get, kv_set, utcnow)
 
 log = logging.getLogger("virtual_ga.tickets")
 TZ = ZoneInfo(settings.TIMEZONE)
@@ -182,6 +182,46 @@ def create_task_ticket(db, sess: ChatSession, name: str, email: str | None, task
     return t
 
 
+def create_approval_ticket(db, sess: ChatSession, name: str, email: str | None, department: str,
+                           resource_id: str, resource_title: str) -> Ticket:
+    """A request for an approval_required resource (app/approvals.py). No visitor-set
+    due date, so - like a message ticket - the deadline is the end of the current shift,
+    going through the exact same reminder ladder as everything else."""
+    on_shift = schedule.on_shift_now()
+    lead = lead_ga()
+    shift_end = schedule.current_shift_end()
+    deadline = _to_naive_utc(shift_end) if shift_end else utcnow() + timedelta(minutes=settings.ESCALATE_AFTER_MINUTES)
+    t = Ticket(session_id=sess.id, question=f"Approval request: {resource_title}", on_shift=[g.name for g in on_shift],
+              kind="approval", next_deadline=deadline, requester_email=(email or "").strip() or None,
+              task={"resource_id": resource_id, "resource_title": resource_title, "department": department.strip()[:200]})
+    db.add(t)
+    db.flush()
+    sess.visitor_name = name.strip()
+
+    first = name.split()[0] if name.strip() else "there"
+    say(db, sess.id, "system", f"Thanks {first}. Your request for {resource_title} has been sent to the GA team for approval.")
+    if not on_shift:
+        t.escalated_at = utcnow()
+
+    mention = list(on_shift)
+    if lead and lead not in mention and (settings.LEAD_ALERT_ON_EVERY_HANDOFF or not on_shift):
+        mention.append(lead)
+    teams.post(teams.build_card(
+        title=f"Approval request: {resource_title}",
+        mention=mention,
+        lines=[
+            ("Requested by", name.strip() or "Not given"),
+            ("Department", department.strip() or "Not given"),
+            ("On shift", ", ".join(t.on_shift) or "Nobody"),
+            ("Ticket", f"#{t.id}"),
+        ],
+        buttons=[("Open and respond", ticket_url(t.id))],
+        style="default" if on_shift else "urgent",
+    ))
+    db.commit()
+    return t
+
+
 # ---------- ownership (Reliability pack) ----------
 
 def claim_ticket(db, ticket_id: int, ga_name: str) -> bool:
@@ -311,12 +351,47 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
         t.resolved_at = utcnow()
         say(db, t.session_id, "system", "This request is marked as resolved. Thanks for stopping by! "
                                         "You can keep asking me questions anytime.")
+    elif action in ("approve", "decline", "hand_in_person"):
+        if t.kind != "approval":
+            raise ValueError("That action is only for an approval request.")
+        apply_approval_decision(db, t, ga_name, {"approve": "approved", "decline": "declined",
+                                                 "hand_in_person": "handed_in_person"}[action], reason)
     else:
         raise ValueError(f"Unknown action {action}")
     if t.status in ("done", "cancelled"):
         _clear_task_file(db, t)
     if t.status == "done" and t.requester_email and t.confirmed is None:
         send_requester_confirmation_email(t)
+    db.commit()
+
+
+def apply_approval_decision(db, t: Ticket, actor: str, decision: str, reason: str | None = None) -> None:
+    """Shared by ga_action's approve/decline/hand_in_person branches (actor = a GA's
+    name) and the staff signed-link route in app/approvals.py (actor = a staff
+    approver's name, which never goes through ga_action's owner/lead gate - the signed,
+    ticket-specific link IS the authorization). Always writes one ApprovalLog row."""
+    if decision == "approved":
+        t.status = "done"
+        t.resolved_at = utcnow()
+        t.task = {**(t.task or {}), "handoff_method": "digital"}
+        say(db, t.session_id, "system",
+            f"Your request for {(t.task or {}).get('resource_title', 'this resource')} has been approved. "
+            "Check your status link for the download - it's available for 24 hours.")
+    elif decision == "declined":
+        if not reason or not reason.strip():
+            raise ValueError("A reason is required to decline.")
+        t.status = "cancelled"
+        t.cancelled_reason = reason.strip()[:500]
+        say(db, t.session_id, "system", "Your request was declined. See your status link for the reason.")
+    elif decision == "handed_in_person":
+        t.status = "done"
+        t.resolved_at = utcnow()
+        t.task = {**(t.task or {}), "handoff_method": "in_person"}
+        say(db, t.session_id, "system", "This was handed to you in person.")
+    else:
+        raise ValueError(f"Unknown decision {decision!r}")
+    db.add(ApprovalLog(ticket_id=t.id, resource_id=(t.task or {}).get("resource_id", ""),
+                       actor=actor, action=decision, reason=reason))
     db.commit()
 
 

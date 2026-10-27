@@ -94,6 +94,26 @@
   </form>
 </div>
 
+<div class="sheet-bg" id="apprBg">
+  <form class="sheet" id="apprForm">
+    <h2>Request a copy</h2>
+    <p class="hint" id="apprResourceLabel"></p>
+    <p class="hint">A GA needs to approve this before it's sent. We never accept a filled-in copy -
+    completed forms go to ISSS directly or are brought in person.</p>
+    <label for="apprName">Your name</label>
+    <input id="apprName" type="text" maxlength="120" required>
+    <label for="apprEmail">Email <span class="hint">(so we can send you the link once it's approved)</span></label>
+    <input id="apprEmail" type="email" maxlength="200">
+    <label for="apprDept">Hiring department <span class="hint">(optional)</span></label>
+    <input id="apprDept" type="text" maxlength="200">
+    <div class="err" id="apprErr"></div>
+    <div class="actions">
+      <button type="button" class="btn quiet" id="apprCancel">Cancel</button>
+      <button class="btn" id="apprSubmit">Send request</button>
+    </div>
+  </form>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const log = $("log");
@@ -129,6 +149,10 @@ function addMsg(m) {
   if (meta.offer_task_form && !ticket) {
     const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = "Request something from the GAs";
     b.onclick = () => openTaskSheet(); el.appendChild(b);
+  }
+  if (meta.offer_approval_request && !ticket) {
+    const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = "Request a copy";
+    b.onclick = () => openApprovalSheet(meta.resource_id, meta.resource_title); el.appendChild(b);
   }
   if (meta.borrow_item_id && !ticket) {
     const b = document.createElement("button"); b.className = "btn small offer"; b.textContent = "Borrow it";
@@ -303,6 +327,28 @@ $("taskForm").onsubmit = async (e) => {
     $("taskBg").style.display = "none"; await poll();
   } catch (err) { $("tErr").textContent = err.message; }
   $("tSubmit").disabled = false;
+};
+
+let apprResourceId = null;
+function openApprovalSheet(resourceId, resourceTitle) {
+  apprResourceId = resourceId;
+  $("apprErr").textContent = "";
+  $("apprResourceLabel").textContent = resourceTitle || "";
+  $("apprName").value = load("vga_name") || ""; $("apprEmail").value = ""; $("apprDept").value = "";
+  $("apprBg").style.display = "flex"; $("apprName").focus();
+}
+$("apprCancel").onclick = () => $("apprBg").style.display = "none";
+$("apprForm").onsubmit = async (e) => {
+  e.preventDefault();
+  $("apprErr").textContent = ""; $("apprSubmit").disabled = true;
+  try {
+    await api(`/api/session/${sid}/request-approval`, { method: "POST", body: JSON.stringify({
+      name: $("apprName").value, email: $("apprEmail").value || null,
+      department: $("apprDept").value, resource_id: apprResourceId }) });
+    store("vga_name", $("apprName").value);
+    $("apprBg").style.display = "none"; await poll();
+  } catch (err) { $("apprErr").textContent = err.message; }
+  $("apprSubmit").disabled = false;
 };
 
 start(false);

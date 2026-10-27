@@ -15,10 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from . import directory, inventory, knowledge, llm, schedule, storage, teams, tickets
+from . import approvals, directory, inventory, knowledge, llm, schedule, storage, teams, tickets
 from .config import BASE_DIR, load_team, settings
-from .db import (ChatSession, Doc, Item, Message, Person, QueryLog, SessionLocal, TaskFile, Ticket,
-                 get_today_note, init_db, set_today_note, utcnow)
+from .db import (ApprovalLog, ChatSession, Doc, Item, Message, Person, QueryLog, SessionLocal, TaskFile,
+                 Ticket, get_today_note, init_db, set_today_note, utcnow)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("virtual_ga")
@@ -103,6 +103,11 @@ def admin_page():
 @app.get("/status/{ticket_id}")
 def status_page(ticket_id: int):
     return FileResponse(STATIC / "status.html")
+
+
+@app.get("/approve/{ticket_id}")
+def approve_page(ticket_id: int):
+    return FileResponse(STATIC / "approve.html")
 
 
 @app.get("/qr.png")
@@ -214,6 +219,20 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
     if TODAY_NOTE_RE.search(text):
         answer = get_today_note(db) or NO_TODAY_NOTE
         tickets.say(db, sid, "bot", answer)
+        db.add(QueryLog(session_id=sess.id, question=text, confident=True))
+        db.commit()
+        return {"relayed": False}
+
+    resource = approvals.find_requested_resource(db, text)
+    if resource is not None:
+        if approvals.COMPLETED_FORM_RE.search(text):
+            tickets.say(db, sid, "bot", approvals.REFUSE_COMPLETED_FORM_TEXT)
+        else:
+            tickets.say(db, sid, "bot",
+                       f"{resource.title} needs a GA's approval before I can share it - it's not something "
+                       "I can send directly. Want me to request a copy for you?",
+                       meta={"offer_approval_request": True, "resource_id": resource.external_id,
+                            "resource_title": resource.title})
         db.add(QueryLog(session_id=sess.id, question=text, confident=True))
         db.commit()
         return {"relayed": False}
@@ -383,6 +402,27 @@ def borrow_item(sid: str, body: BorrowIn, db=Depends(get_db)):
     t = tickets.create_task_ticket(db, sess, name, None, "Supplies/equipment",
                                    f"Borrow: {item.item} (borrowed by {name})", 1, tickets.end_of_today(),
                                    "Front desk")
+    return {"ticket_id": t.id}
+
+
+class RequestApprovalIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str | None = Field(None, max_length=200)
+    department: str = Field("", max_length=200)
+    resource_id: str
+
+
+@app.post("/api/session/{sid}/request-approval")
+def request_approval(sid: str, body: RequestApprovalIn, db=Depends(get_db)):
+    sess = _session(db, sid)
+    if tickets.open_ticket_for(db, sid):
+        raise HTTPException(409, "A GA has already been notified")
+    resource = db.scalars(select(Doc).where(Doc.external_id == body.resource_id,
+                                            Doc.audience == "approval_required")).first()
+    if not resource:
+        raise HTTPException(404, "That resource isn't available to request.")
+    t = tickets.create_approval_ticket(db, sess, body.name, body.email, body.department,
+                                       resource.external_id, resource.title)
     return {"ticket_id": t.id}
 
 
@@ -556,11 +596,18 @@ def ga_ticket_file(ticket_id: int, db=Depends(get_db)):
 def _status_json(t: Ticket) -> dict:
     """Requester-facing view: status/timing only, never the visitor's phone number or
     the full GA chat transcript."""
-    return {"id": t.id, "status": t.status, "kind": t.kind, "task_type": (t.task or {}).get("type"),
-            "created_at": tickets.local(t.created_at).strftime("%a %I:%M %p"),
-            "due_at": tickets.local(t.due_at).strftime("%a %I:%M %p") if t.due_at else None,
-            "confirm_prompt": t.status == "done" and t.confirmed is None,
-            "confirmed": t.confirmed}
+    out = {"id": t.id, "status": t.status, "kind": t.kind, "task_type": (t.task or {}).get("type"),
+          "created_at": tickets.local(t.created_at).strftime("%a %I:%M %p"),
+          "due_at": tickets.local(t.due_at).strftime("%a %I:%M %p") if t.due_at else None,
+          "confirm_prompt": t.status == "done" and t.confirmed is None and t.kind != "approval",
+          "confirmed": t.confirmed}
+    if t.kind == "approval":
+        handoff = (t.task or {}).get("handoff_method")
+        downloadable = (t.status == "done" and handoff == "digital" and t.resolved_at is not None
+                       and utcnow() - t.resolved_at <= timedelta(hours=24))
+        out.update(resource_title=(t.task or {}).get("resource_title"), handoff_method=handoff,
+                  downloadable=downloadable, decline_reason=t.cancelled_reason if t.status == "cancelled" else None)
+    return out
 
 
 @app.get("/api/status/{ticket_id}", dependencies=[Depends(ticket_access)])
@@ -582,6 +629,58 @@ def confirm_status(ticket_id: int, body: StatusConfirmIn, db=Depends(get_db)):
         raise HTTPException(409, "This has already been answered")
     tickets.confirm_requester(db, t, body.confirmed)
     return _status_json(t)
+
+
+@app.get("/api/status/{ticket_id}/download", dependencies=[Depends(ticket_access)])
+def download_approval_file(ticket_id: int, db=Depends(get_db)):
+    t = db.get(Ticket, ticket_id)
+    if not t or t.kind != "approval":
+        raise HTTPException(404)
+    if not _status_json(t)["downloadable"]:
+        raise HTTPException(403, "This link isn't available - it's expired, not approved, or was handed over in person.")
+    resource_id = (t.task or {}).get("resource_id")
+    doc = db.scalars(select(Doc).where(Doc.external_id == resource_id,
+                                       Doc.audience == "approval_required")).first()
+    if not doc or not doc.source_file:
+        raise HTTPException(404, "File not available.")
+    path = knowledge.RESOURCES_DIR / doc.source_file
+    if not path.is_file():
+        raise HTTPException(404, "File not available.")
+    return FileResponse(path, filename=path.name, media_type="application/pdf")
+
+
+@app.get("/api/approve/{ticket_id}", dependencies=[Depends(ticket_access)])
+def get_approval_ticket(ticket_id: int, db=Depends(get_db)):
+    t = db.get(Ticket, ticket_id)
+    if not t or t.kind != "approval":
+        raise HTTPException(404)
+    return {"id": t.id, "status": t.status, "resource_title": (t.task or {}).get("resource_title"),
+            "department": (t.task or {}).get("department"),
+            "requested_by": db.get(ChatSession, t.session_id).visitor_name,
+            "created_at": tickets.local(t.created_at).strftime("%a %I:%M %p"),
+            "decline_reason": t.cancelled_reason if t.status == "cancelled" else None}
+
+
+class StaffDecisionIn(BaseModel):
+    decision: str  # approved | declined
+    reason: str | None = None
+
+
+@app.post("/api/approve/{ticket_id}", dependencies=[Depends(ticket_access)])
+def staff_decide(ticket_id: int, body: StaffDecisionIn, db=Depends(get_db)):
+    t = db.get(Ticket, ticket_id)
+    if not t or t.kind != "approval":
+        raise HTTPException(404)
+    if t.status not in tickets.OPEN_STATUSES:
+        raise HTTPException(409, "This request has already been decided.")
+    if body.decision not in ("approved", "declined"):
+        raise HTTPException(400, "Unknown decision.")
+    staff_name = approvals.get_asked_staff_name(db, t) or "Staff approver"
+    try:
+        tickets.apply_approval_decision(db, t, staff_name, body.decision, body.reason)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"status": t.status}
 
 
 @app.post("/api/ga/ticket/{ticket_id}/claim", dependencies=[Depends(ticket_access)])
@@ -607,6 +706,28 @@ def ga_ticket_action(ticket_id: int, body: ActionIn, db=Depends(get_db)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _ticket_json(db, t, True)
+
+
+class AskStaffIn(BaseModel):
+    ga_name: str
+    staff_name: str
+
+
+@app.post("/api/ga/ticket/{ticket_id}/ask-staff", dependencies=[Depends(ticket_access)])
+def ga_ask_staff(ticket_id: int, body: AskStaffIn, db=Depends(get_db)):
+    t = db.get(Ticket, ticket_id)
+    if not t:
+        raise HTTPException(404)
+    try:
+        result = approvals.ask_staff_to_approve(db, t, body.staff_name, body.ga_name.strip())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
+@app.get("/api/ga/approvers", dependencies=[Depends(require_ga)])
+def ga_list_approvers(db=Depends(get_db)):
+    return {"names": [p.name for p in approvals.get_approvers(db)]}
 
 
 # ---------------- admin API ----------------
@@ -850,6 +971,29 @@ def get_settings(db=Depends(get_db)):
 def update_settings(body: SettingsIn, db=Depends(get_db)):
     directory.set_show_extensions(db, body.show_extensions)
     return {"show_extensions": body.show_extensions}
+
+
+class ApproversIn(BaseModel):
+    names: list[str]
+
+
+@app.get("/api/admin/approvers", dependencies=[Depends(require_admin)])
+def get_approvers_setting(db=Depends(get_db)):
+    return {"names": [p.name for p in approvals.get_approvers(db)]}
+
+
+@app.post("/api/admin/approvers", dependencies=[Depends(require_admin)])
+def set_approvers_setting(body: ApproversIn, db=Depends(get_db)):
+    approvals.set_approvers(db, body.names)
+    return {"names": [p.name for p in approvals.get_approvers(db)]}
+
+
+@app.get("/api/admin/approval-log", dependencies=[Depends(require_admin)])
+def get_approval_log(db=Depends(get_db)):
+    rows = db.scalars(select(ApprovalLog).order_by(ApprovalLog.id.desc()).limit(100)).all()
+    return {"entries": [{"id": r.id, "ticket_id": r.ticket_id, "resource_id": r.resource_id,
+                         "actor": r.actor, "action": r.action, "reason": r.reason,
+                         "at": tickets.local(r.at).strftime("%b %d %I:%M %p")} for r in rows]}
 
 
 @app.get("/api/admin/schedule", dependencies=[Depends(require_admin)])

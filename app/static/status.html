@@ -41,7 +41,20 @@ function render(s) {
     <span class="pill">${statusLabel}</span>
     <div class="row">Requested ${s.created_at}</div>`;
   if (s.due_at) html += `<div class="row">Needed by ${s.due_at}</div>`;
-  if (s.confirm_prompt) {
+  if (s.kind === "approval") {
+    if (s.downloadable) {
+      html += `<p class="thanks">Approved! Your download is ready (available for 24 hours).</p>
+        <div class="actions"><a class="btn" style="text-decoration:none" href="/api/status/${ticketId}/download?t=${encodeURIComponent(token)}">Download</a></div>`;
+    } else if (s.handoff_method === "in_person") {
+      html += `<p class="thanks">This was handed to you in person.</p>`;
+    } else if (s.status === "done") {
+      html += `<p class="thanks">This was approved, but the download link has expired. Ask a GA for another copy.</p>`;
+    } else if (s.status === "cancelled") {
+      html += `<p class="thanks">Declined: ${s.decline_reason || "no reason given"}.</p>`;
+    } else {
+      html += `<p class="thanks">Waiting for a GA (or staff approver) to review this.</p>`;
+    }
+  } else if (s.confirm_prompt) {
     html += `<p class="thanks">Was this taken care of?</p>
       <div class="actions"><button class="btn quiet" id="noBtn">No</button><button class="btn" id="yesBtn">Yes</button></div>
       <div class="err" id="err"></div>`;

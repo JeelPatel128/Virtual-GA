@@ -28,7 +28,11 @@ write_ics([
 ])
 
 os.environ.update({
-    "DATABASE_URL": f"sqlite:///{TMP / 'test.db'}",
+    # Never DATABASE_URL (production) - tests always use DATABASE_URL_DEV, with
+    # GIT_BRANCH forced to a non-"main" sentinel so this holds regardless of which
+    # branch actually happens to be checked out when the suite runs.
+    "GIT_BRANCH": "test",
+    "DATABASE_URL_DEV": f"sqlite:///{TMP / 'test.db'}",
     "GEMINI_API_KEY": "",
     "TEAMS_WEBHOOK_URL": "",
     "GCAL_ICS_URL": f"file://{ICS}",
@@ -841,6 +845,50 @@ def test_approval_gated_resource_request_flow():
             if d:
                 c.delete(f"/api/admin/docs/{d.id}", headers=A)
     print("approval-gated resource request flow test passed")
+
+
+def test_database_safety_guard():
+    """app/config.py::check_database_safety - refuses to start if a non-main branch
+    would use the production DATABASE_URL. Patches the already-imported settings
+    object directly (module-level values are computed once at import time, not
+    re-read per call) rather than re-importing app.config under different env vars,
+    which would re-run this whole test file's own module-level setup."""
+    from app import config
+
+    orig_branch, orig_db_url, orig_effective = (config.settings.GIT_BRANCH, config.settings.DATABASE_URL,
+                                                 config.settings.EFFECTIVE_DATABASE_URL)
+    try:
+        # on main, pointed at DATABASE_URL: fine (this is the real production case)
+        config.settings.GIT_BRANCH = "main"
+        config.settings.DATABASE_URL = "postgresql://prod/db"
+        config.settings.EFFECTIVE_DATABASE_URL = "postgresql://prod/db"
+        config.check_database_safety()  # must not raise
+
+        # not on main, but pointed at DATABASE_URL anyway: refuse
+        config.settings.GIT_BRANCH = "some-feature-branch"
+        config.settings.DATABASE_URL = "postgresql://prod/db"
+        config.settings.EFFECTIVE_DATABASE_URL = "postgresql://prod/db"
+        try:
+            config.check_database_safety()
+            assert False, "must refuse to start"
+        except RuntimeError as e:
+            assert "DATABASE_URL_DEV" in str(e)
+
+        # not on main, pointed at a different (dev) database: fine
+        config.settings.GIT_BRANCH = "some-feature-branch"
+        config.settings.DATABASE_URL = "postgresql://prod/db"
+        config.settings.EFFECTIVE_DATABASE_URL = "sqlite:///dev.db"
+        config.check_database_safety()  # must not raise
+
+        # not on main, DATABASE_URL unset entirely: nothing to compare against, fine
+        config.settings.GIT_BRANCH = "some-feature-branch"
+        config.settings.DATABASE_URL = ""
+        config.settings.EFFECTIVE_DATABASE_URL = "sqlite:///dev.db"
+        config.check_database_safety()  # must not raise
+    finally:
+        config.settings.GIT_BRANCH, config.settings.DATABASE_URL, config.settings.EFFECTIVE_DATABASE_URL = (
+            orig_branch, orig_db_url, orig_effective)
+    print("database safety guard test passed")
 
 
 def test_storage_module_degrades_and_builds_correct_requests():
@@ -2001,6 +2049,7 @@ if __name__ == "__main__":
     test_inventory_import_matching_borrow_and_ga_search()
     test_ga_resources_import_and_audience_gating()
     test_approval_gated_resource_request_flow()
+    test_database_safety_guard()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

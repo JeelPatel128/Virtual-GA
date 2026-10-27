@@ -8,14 +8,16 @@ from sqlalchemy import (Boolean, DateTime, ForeignKey, Integer, LargeBinary, Str
                         create_engine, JSON)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from .config import settings
+from .config import check_database_safety, settings
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-_url = settings.DATABASE_URL
+check_database_safety()
+
+_url = settings.EFFECTIVE_DATABASE_URL
 if _url.startswith("postgres://"):
     _url = _url.replace("postgres://", "postgresql+psycopg://", 1)
 elif _url.startswith("postgresql://"):

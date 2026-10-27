@@ -111,17 +111,35 @@ GA resources are just `Doc` rows in the existing knowledge base.
 | 3 | Overdue loans use the existing reminder ladder | ✅ Done - "Borrow it" creates a normal task ticket (due today end of day, borrower named in its text), no new escalation mechanism needed |
 | 4 | GA console: inventory search (everything, incl. Josa's/ga_only) + one-tap in stock/low/out buttons | ✅ Done |
 | 5 | Daily digest: low/out stock, borrowed items not yet returned | ✅ Done |
-| 6 | GA resources: index each PDF (or its CSV `summary` as a fallback, before the real files exist) into the knowledge base, tagged `audience`/`seasonal`/`linked_faq_ids` | ✅ Done, verified against Supabase (9 real rows imported, summary-only - the actual PDFs haven't been placed under `data/resources/` yet) |
+| 6 | GA resources: index each PDF (or its CSV `summary` as a fallback, before the real files exist) into the knowledge base, tagged `audience`/`seasonal`/`linked_faq_ids` | ✅ Done. 5 real PDFs now live under `data/resources/` (committed, not gitignored) and all 9 resources are re-imported with their real extracted text, verified against Supabase |
 | 7 | `audience=ga_only`/`seasonal=yes` resources excluded from every visitor search; searchable from the GA console/admin only | ✅ Done - `knowledge.search()`'s new `visitor` flag |
 
 **FAQ re-import**: the real `virtual-ga-faq.csv` (50 rows) was imported against the real
 Supabase DB — 12 imported, 38 skipped as "Needs answer", matching Jeel's expected split
 exactly.
 
-**Still needed from Jeel:** the actual 5 PDFs under `data/resources/` (committed to the
-repo, not gitignored) — until then, each resource's bot/GA-visible content is just its
-CSV `summary` line. Re-running the resources import after they're added picks up the
-real extracted text automatically.
+## Approval-gated resources (2026-10-27 spec, built 2026-10-27, `reliability-pack-2`)
+
+Not merged to `main`. A `Doc.audience` of `"approval_required"` (new value, on top of the
+`public`/`ga_only` pair above) is never shown, attached, linked or quoted to a visitor in
+any form — `knowledge.search()`'s visitor gating is an allowlist (only `"public"` is
+visitor-facing), so this is structurally excluded regardless of matching precision
+elsewhere. Currently used for RES06, the ISSS On-Campus Employment Verification Form.
+
+| # | Item | Status |
+|---|---|---|
+| 1 | New `audience="approval_required"` value, excluded from visitor search | ✅ Done |
+| 2 | Visitor can ask for the resource and request a copy; never upload or send a completed one (reply explains why, points to ISSS/in person) | ✅ Done - no file-upload path exists on this flow at all, so there's nothing to refuse structurally either; a text mention of a completed form is refused too |
+| 3 | Request creates `kind="approval"` ticket: normal Teams card, claim, reminder ladder (team.json only) | ✅ Done - `tickets.create_approval_ticket`, deadline = end of current shift (no visitor-set due date), same ladder as everything else |
+| 4 | GA console: Approve / Decline (reason required) / Hand in person; approved → signed 24h download link on the requester's status page, tied to that one ticket | ✅ Done. Reuses existing Ticket fields throughout (`cancelled_reason` for the decline reason, `resolved_at` as the approval timestamp, `task` JSON for the handoff method) - no new Ticket columns |
+| 5 | Staff approvers setting (default Josa Balisi/Yadilsa Gomez/Megan Maher, matched from the directory); GA can ask one, who gets a signed approve/decline link by email (or the GA forwards it manually if SMTP isn't set); staff never auto-notified or added to the ladder | ✅ Done. **Blocker found**: the real `ssb_directory.csv` has never actually been imported into Supabase (`people` table has 0 rows - flagged back in Phase 2b, still open), so none of the 3 default approvers resolve to a real person yet. Added "Yadi" as an alias for Yadilsa Gomez in the local CSV so it's ready the moment the import happens; didn't run that 105-row import myself since it's a separate decision outside this task. Until then, an admin can point the approvers setting at any name already in the directory. |
+| 6 | Audit log (who approved/declined/handed over/was asked, when, ticket, resource), visible in admin | ✅ Done - new `ApprovalLog` table, admin viewer under Setup |
+| 7 | Tests: 5 phrasings never leak the file; link fails for another ticket and after 24h; decline shows the reason; staff never auto-notified; log is written | ✅ Done, all pass |
+
+Also re-imported `ga_resources.csv` (RES06 → `approval_required`) and `virtual-ga-faq.csv`
+(C4's answer no longer offers the file directly) against the real Supabase DB - same 12/38
+FAQ split as before, RES06 confirmed excluded from a live visitor search and present in a
+GA/admin one.
 
 ## Sustainability pack (2026-10-22, spec from outside this repo — pending)
 

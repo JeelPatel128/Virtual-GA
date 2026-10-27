@@ -58,15 +58,20 @@ class Doc(Base):
     handled_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     changes_each_semester: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # GA resources library (migrated onto the existing table). audience="ga_only" or
-    # seasonal=True docs are excluded from every visitor-facing search (see
-    # knowledge.search's visitor flag) - searchable only from the GA console/admin.
+    # GA resources library (migrated onto the existing table). knowledge.search's
+    # visitor flag only ever includes audience="public" docs - "ga_only" and
+    # "approval_required" (and anything else added later) are excluded by default
+    # (an allowlist, not a denylist), searchable only from the GA console/admin.
     # Default "public"/False so every pre-existing Doc (manual Q&As, uploads) is
     # unaffected. linked_faq_ids is reference metadata (which FAQ rows a resource
-    # supports), not used to gate anything.
+    # supports), not used to gate anything. source_file is the path under
+    # data/resources/ (committed to the repo, unlike the gitignored CSVs) - kept so an
+    # approved download can re-locate the file without depending on the CSV still
+    # being present.
     audience: Mapped[str] = mapped_column(String(20), default="public")
     seasonal: Mapped[bool] = mapped_column(Boolean, default=False)
     linked_faq_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    source_file: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class Chunk(Base):
@@ -164,6 +169,19 @@ class ReminderLog(Base):
     ga_name: Mapped[str] = mapped_column(String(120), index=True)
     step: Mapped[int] = mapped_column(Integer)
     fired_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ApprovalLog(Base):
+    """Audit trail for an approval_required resource request (app/approvals.py): who
+    approved/declined/handed it over or was asked to, when, which ticket and resource."""
+    __tablename__ = "approval_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id", ondelete="CASCADE"), index=True)
+    resource_id: Mapped[str] = mapped_column(String(20))
+    actor: Mapped[str] = mapped_column(String(200))  # a GA's name, or a staff approver's name
+    action: Mapped[str] = mapped_column(String(30))  # approved | declined | handed_in_person | asked_staff
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class QueryLog(Base):
@@ -296,6 +314,7 @@ _MIGRATIONS = [
     ("docs", "audience", "TEXT"),
     ("docs", "seasonal", "BOOLEAN"),
     ("docs", "linked_faq_ids", "JSON"),
+    ("docs", "source_file", "TEXT"),
 ]
 
 

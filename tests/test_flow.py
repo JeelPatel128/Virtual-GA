@@ -97,7 +97,7 @@ def test_migration_adds_columns_to_old_tables():
            "file_backend", "file_ref"} <= ticket_cols
     assert {"external_id", "category", "faq_type", "variants", "asked_by", "times_mentioned",
            "source", "handled_by", "changes_each_semester", "status"} <= doc_cols
-    assert {"audience", "seasonal", "linked_faq_ids"} <= doc_cols
+    assert {"audience", "seasonal", "linked_faq_ids", "source_file"} <= doc_cols
     eng.dispose()
 
 

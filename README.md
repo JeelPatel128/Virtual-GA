@@ -84,7 +84,7 @@ Render's free tier sleeps after about 15 idle minutes. A sleeping server can't e
 1. Create a free account at cron-job.org.
 2. Add a job that GETs `https://YOUR-APP.onrender.com/tasks/tick?key=YOUR_CRON_SECRET` **every minute**.
 
-This one job runs the reminder ladder, shift handoff/start, task heads-ups, the 5 PM digest and Monday's weekly report, deletes phone numbers after 30 days and old task files after 14, and keeps the server awake.
+This one job runs the reminder ladder, shift handoff/start, task heads-ups, the 5 PM digest, Monday's weekly report, the 1st-of-the-month stats export, the daily retention job (see "Data and privacy" below), deletes phone numbers after 30 days and old task files after 14, and keeps the server awake.
 
 > Free-tier limits (Render hours, Gemini requests per day, Supabase pausing) change over time. Check each provider's current limits before launch.
 
@@ -250,27 +250,76 @@ To run the end-to-end test, which needs no external services:
 python tests/test_flow.py
 ```
 
-## Privacy and rules built in
-- Phone numbers are optional, require a consent checkbox, are never posted to Teams (only shown in the console), and are deleted after 30 days.
-- A task's attached file is deleted as soon as it's marked done or cancelled (14-day sweep as a backstop), and a signed GA-console link is the only way to open one - it's never posted to Teams.
-- The bot is instructed never to discuss grades, IDs, or financial or medical details, and to hand those requests to a human.
+## Data and privacy
+
+**What's collected, and for how long.** A visitor sees a one-line notice under the chat
+box linking to `/privacy`, a short page covering all of this in plain language.
+- Phone numbers are optional, require a consent checkbox, are never posted to Teams (only
+  shown in the console), and are deleted after 30 days (`PHONE_RETENTION_DAYS`, also an
+  admin-settable period - see below).
+- A task's attached file is deleted as soon as it's marked done or cancelled (14-day sweep
+  as a backstop), and a signed GA-console link is the only way to open one - it's never
+  posted to Teams.
+- A visitor's name and email are removed after 180 days (replaced with "Visitor #<id>" on
+  their session/ticket) - except an approval-gated resource request (e.g. an employment
+  verification form), kept for 1 year for audit purposes before the same anonymizing happens.
+- A question's own text is kept for 180 days, then deleted - but not lost: its topic
+  (an FAQ's category, "People & offices" for a directory answer, "Places" for a room
+  lookup, "Supplies" for inventory, or "Unanswered") and month are rolled into a running
+  count first, so trend reporting survives even once the question itself is gone.
+- The bot is instructed never to discuss grades, IDs, or financial or medical details, and
+  to hand those requests to a human - and never asks for a password, Social Security
+  number, or payment detail in the chat at all.
 - Visitors are limited to 30 bot questions per hour, which protects the free Gemini quota.
-- Every reminder, escalation and report stays inside `team.json` - the SSB staff directory is never used for alerts.
-- Josa's personal inventory and anything marked GA-only (stock or a resource) is never shown to a visitor, in any form.
-- Get approval from your manager before putting the QR code on the desk, since the bot speaks on behalf of SSB.
+- Every reminder, escalation and report stays inside `team.json` - the SSB staff directory
+  is never used for alerts.
+- Josa's personal inventory and anything marked GA-only (stock or a resource) is never
+  shown to a visitor, in any form.
+
+**The retention job** (`app/retention.py`) runs once a day and is **preview mode by
+default**: it computes what it would anonymize or delete - counts per table, plus a few
+masked examples (e.g. "A\*\*\* S\*\*\*\*\*\*\*") - without changing anything, visible on the
+admin **Setup** tab. Turning on **Enable retention** there makes the next run (and every
+one after) real. All the periods above (visitor info, question log, approval requests,
+phone numbers, task files) are admin-settable from that same panel, not fixed constants.
+
+**Monthly export:** on the 1st of each month, an anonymized CSV (questions, answered-by-bot
+%, handoffs, avg response, tasks, escalations, top topics) is saved and downloadable from
+the admin Digest tab. It never contains a name, email, or phone number - only aggregate
+counts.
+
+**Database security:** every Supabase table has row-level security turned on with no
+policies - the app always connects as the table owner, which bypasses RLS regardless, so
+this is a backstop against the Supabase anon/authenticated roles (never used or exposed by
+this app) ever reading a table directly through some other route, like PostgREST. The
+**Setup** tab flags any table where RLS is unexpectedly off.
+
+**Access controls:**
+- `/api/admin/login` and `/api/ga/login` lock out for 15 minutes after 5 failed attempts.
+- Every admin action (not a plain read) is logged - who (a name typed at sign-in, not a
+  verified login, since there's one shared admin password), what, and when - visible on
+  the **Setup** tab.
+- The **Setup** tab has a **Rotate GA key** button for when the shared `GA_KEY` needs to
+  change without a Render redeploy - it logs out every GA console signed in with the old
+  key immediately, and shows the new one once, to copy out to the team.
+
+Get approval from your manager before putting the QR code on the desk, since the bot
+speaks on behalf of SSB.
 
 ## Project layout
 ```
 app/main.py         routes: visitor chat, GA console, admin, requester status page, cron tick
-app/tickets.py      claim, status model, reminder ladder, shift handoff, confirmation, digest, weekly report
+app/tickets.py      claim, status model, reminder ladder, shift handoff, confirmation, digest, weekly report, monthly export
 app/knowledge.py    file reading, chunking, embeddings, search, FAQ bulk import, GA resources
 app/directory.py    person/place resolver: name, fuzzy, role matching; CSV upsert import
 app/inventory.py    front-desk inventory: CSV upsert import, "do you have X" matching, borrowing
 app/storage.py      task-file attachments: Supabase Storage, with a local DB table fallback
+app/retention.py    preview-mode anonymization/rollup job, admin-settable periods
+app/tokens.py       purpose-scoped signed links (status, download, staff approve, GA console)
 app/llm.py          Gemini: answers, embeddings, image and video reading
 app/schedule.py     Google Calendar shifts
 app/teams.py        Teams Adaptive Cards
-app/static/         visitor.html, ga.html, admin.html, status.html (requester confirmation)
+app/static/         visitor.html, ga.html, admin.html, status.html, approve.html, privacy.html
 tools/find_emails.py  standalone script: finds public stevens.edu emails for the directory
 tests/test_flow.py  full end-to-end test
 ```

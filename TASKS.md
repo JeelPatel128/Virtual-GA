@@ -141,6 +141,59 @@ Also re-imported `ga_resources.csv` (RES06 → `approval_required`) and `virtual
 FAQ split as before, RES06 confirmed excluded from a live visitor search and present in a
 GA/admin one.
 
+## Link security + dev/prod database separation (2026-10-27, `reliability-pack-2`)
+
+Not merged to `main`. Two fixes, both prompted by JP's review of the approval-gated
+resources work above.
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Replace the single shared `ticket_token()` (worked interchangeably for a requester's status link, an approved download, a staff approve/decline link, *and* the GA console itself) with 4 purpose-scoped signed tokens (`status`, `download`, `staff_approve`, `ga_action`), each an HMAC over `(purpose, ticket_id, expires_at, nonce)` so a token minted for one purpose/ticket is cryptographically rejected by any other | ✅ Done - new `app/tokens.py`. `staff_approve` is also single-use, tracked in a new `StaffApprovalLink` table (a signature alone can't record "already spent") |
+| 2 | Test that a status, download, or staff token can't claim or act on a ticket in the GA console (and the reverse - a `ga_action` token can't view/decide a staff approval) | ✅ Done |
+| 3 | Startup guard: refuse to start if the app isn't `APP_ENV=production` but the database it's pointed at is the production `DATABASE_URL` | ✅ Done, **on `reliability-pack-2` only** - see the main/branch note below |
+| 4 | Branches/tests use `DATABASE_URL_DEV`; only `main` on Render uses `DATABASE_URL` | ✅ Done, same branch scope |
+
+**Correction worth recording:** item 3 was first built by detecting the current git
+branch (`main` vs. anything else). JP rejected that approach - branch detection may not
+be available on Render at all, and a false negative there would stop *production itself*
+from starting. Rebuilt around an explicit `APP_ENV` setting instead
+(`APP_ENV=production` → `DATABASE_URL`; anything else, default `"dev"` → `DATABASE_URL_DEV`,
+falling back to local SQLite, never to `DATABASE_URL`). The git-branch mechanism was fully
+removed, not kept as a fallback.
+
+**Important gap - render.yaml vs. the code it configures:** `main`'s `render.yaml` has had
+an `APP_ENV: production` line since the earlier "prepare main for a Render deploy" task
+(2026-10-27, done directly on `main`, before this guard existed). But the *application
+code* that reads `APP_ENV` and enforces the guard (`app/config.py`'s
+`EFFECTIVE_DATABASE_URL`/`check_database_safety()`, and `app/db.py` calling it before the
+engine is created) was built entirely within `reliability-pack-2` and has **never been
+merged to `main`**. Today, `main` still runs the old `config.py` - `APP_ENV` is set on
+Render but nothing in `main`'s code reads it, so it's currently inert there. This isn't
+dangerous as `main` stands today (its code only ever points at `DATABASE_URL`, which on
+Render *is* the production database, by design), but it means the safety guard itself -
+the thing meant to stop a non-production context from touching production - doesn't exist
+on `main` in any form yet. Bringing it over is a small, scoped change (just the two files
+above) whenever JP decides it should move, separate from merging the rest of
+`reliability-pack-2`.
+
+## Security and data retention (2026-10-27/28 spec, built 2026-10-27/28, `reliability-pack-2`)
+
+Not merged to `main`. Five items plus one follow-up correction, all built against the real
+Supabase dev database (`DATABASE_URL_DEV`) once it became reachable.
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Row-level security enabled on every Supabase table, no policies (the app connects as table owner, which bypasses RLS regardless - this is a backstop against the anon/authenticated roles, which this app never uses or exposes) | ✅ Done, **verified against the real dev database**: all 18 tables confirmed `relrowsecurity = true`, 0 rows touched (schema/security only) |
+| 2 | Preview-mode-by-default retention job: anonymizes a visitor's name/email on sessions/tickets after 180 days (→ "Visitor #<id>"; an approval-gated resource request's identity is kept 1 year instead, for audit purposes), rolls 180-day-old question-log text into a monthly `topic_counts` table (category + month + count) before deleting it, with every period admin-settable | ✅ Done - `app/retention.py`. Every run computes and stores a preview (counts + masked examples) regardless; a run only actually mutates anything once the admin turns "Enable retention" on, on the Setup tab |
+| 3 | `QueryLog.category` - whatever answered the question: an FAQ Doc's own category, "People & offices"/"Places" for the directory resolver, "Supplies" for inventory, "Unanswered" otherwise. Directory-resolved answers are now logged into `QueryLog` for the first time to make this possible (so they also now count toward the hourly per-session bot-question cap, like every other answer path already did) | ✅ Done |
+| 4 | Monthly export: on the 1st, an anonymized CSV (questions, answered-by-bot %, handoffs, avg response, tasks, escalations, top topics) saved to a new `monthly_exports` table, downloadable from the admin Digest tab - never a name, email, or phone number | ✅ Done |
+| 5 | Access controls: `/api/admin/login` and a new `/api/ga/login` lock out for 15 minutes after 5 failed attempts (scoped to just those two explicit login checks, not every already-authenticated request); every admin write (not a read) logged who/what/when to a new audit log, visible on Setup; admin **Rotate GA key** button (stores a KV override Render env vars can't otherwise receive, shown once, logs out every signed-in console immediately) plus a **Reset to Render key** button (clears the override) - Setup states plainly which source (database or Render) is active, never the key itself | ✅ Done |
+| 6 | Visitor-facing privacy notice (one line under the chat box) linking to a new short `/privacy` page; README "Data and privacy" section covering all of the above | ✅ Done |
+
+**Existing phone (30-day) and task-file (14-day) purges are unchanged in behavior** but
+now read their day counts from the same admin settings panel instead of a fixed constant,
+per item 5's "all retention periods are admin settings" requirement.
+
 ## Sustainability pack (2026-10-22, spec from outside this repo — pending)
 
 JP's spec not pasted yet. Named scope so far: admin-managed settings, health checks, content
@@ -172,6 +225,21 @@ expiry, runbook.
 |---|---|---|
 | 4.1 | CC | Analytics page: response time by GA, busiest hours heatmap, top question topics, % answered by the bot week over week |
 | 4.2 | JP | After 4 weeks, write the impact summary (questions handled, average response time, GA hours saved) for your resume and portfolio |
+
+## Later
+
+Not scheduled into a phase yet - ideas worth keeping track of as they come up.
+
+- **Individual GA logins to replace the shared `GA_KEY`.** Every GA currently signs into
+  the console with the same team key (`app/main.py::require_ga`), so the admin audit log's
+  "who" (`X-Admin-Name`) pattern already proves out for admin actions - a GA console login
+  has no equivalent today, and the GA console itself has no "who acted" header at all
+  (actions are attributed via the `me()` name picker in the UI, not authentication). Moving
+  to individual logins would need: a per-GA credential (password or passkey) instead of one
+  shared secret, a real login/session mechanism (the current header-key model has no
+  concept of "signed in as a specific person"), and a decision on who can issue/reset a
+  GA's credential. The GA_KEY rotate/reset buttons built in the security pack above remain
+  useful either way, as an "everyone's locked out, issue a fresh shared key" escape hatch.
 
 ---
 

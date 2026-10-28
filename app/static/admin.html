@@ -146,10 +146,14 @@
           <button class="btn quiet" id="reembed">Re-index knowledge with AI</button>
         </div><div class="msgline" id="setupMsg"></div></div>
       <div class="card"><h2>GA key</h2>
-        <p class="hint" id="gaKeyStatus">Loading...</p>
+        <p class="hint">Active key source: <b id="gaKeySource">Loading...</b> (the key itself is never shown here, only which source is in use).</p>
         <p class="hint">Rotating logs out every GA console signed in with the old key immediately - they'll
-        need the new one to sign back in. The new key is shown once, right here, and never again.</p>
-        <button class="btn quiet" id="rotateGaKey">Rotate GA key</button>
+        need the new one to sign back in. The new key is shown once, right here, and never again.
+        Reset clears the database override and goes back to the GA_KEY env var set on Render.</p>
+        <div class="btns" style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn quiet" id="rotateGaKey">Rotate GA key</button>
+          <button class="btn quiet" id="resetGaKey">Reset to Render key</button>
+        </div>
         <div id="rotatedKeyBox" style="display:none;margin-top:10px">
           <p class="hint">New GA key (copy this to the team now, e.g. post it in Teams):</p>
           <code id="rotatedKeyValue" style="display:block;padding:8px;background:var(--line);border-radius:6px;word-break:break-all"></code>
@@ -404,9 +408,7 @@ async function loadSetup() {
       : "Enabled on every table (SQLite shows this as Ready - RLS is a Postgres-only concept).")}
     </table><p class="hint">Public link: ${esc(s.public_url)} · Open tickets: ${s.open_tickets}</p>
     <p><b>Team:</b> ${s.team.map(g => esc(g.name) + (g.lead ? " (lead)" : "")).join(", ") || '<span class="no">team.json is empty</span>'}</p>`;
-  $("gaKeyStatus").textContent = s.ga_key_rotated
-    ? "Rotated at least once - the team is using a key generated here, not the GA_KEY env var."
-    : "Using the GA_KEY env var set on Render (never rotated here).";
+  $("gaKeySource").textContent = s.ga_key_rotated ? "Database (rotated here)" : "Render (GA_KEY env var)";
   const settings = await api("/api/admin/settings");
   $("showExtensions").checked = settings.show_extensions;
   const approvers = await api("/api/admin/approvers");
@@ -455,7 +457,16 @@ $("rotateGaKey").onclick = async () => {
     $("rotatedKeyValue").textContent = r.ga_key;
     $("rotatedKeyBox").style.display = "block";
     flash("gaKeyMsg", "Rotated - copy the key above to the team now.");
-    $("gaKeyStatus").textContent = "Rotated at least once - the team is using a key generated here, not the GA_KEY env var.";
+    $("gaKeySource").textContent = "Database (rotated here)";
+  } catch (er) { flash("gaKeyMsg", er.message, true); }
+};
+$("resetGaKey").onclick = async () => {
+  if (!confirm("This logs out every GA console signed in with the database key right away, and switches back to the GA_KEY env var set on Render. Continue?")) return;
+  try {
+    await api("/api/admin/ga-key/reset", { method: "POST" });
+    $("rotatedKeyBox").style.display = "none";
+    $("gaKeySource").textContent = "Render (GA_KEY env var)";
+    flash("gaKeyMsg", "Reset - the team now needs the Render GA_KEY.");
   } catch (er) { flash("gaKeyMsg", er.message, true); }
 };
 $("showExtensions").onchange = async (e) => { try { await api("/api/admin/settings", { method: "POST", body: JSON.stringify({ show_extensions: e.target.checked }) }); flash("extMsg", "Saved"); } catch (er) { flash("extMsg", er.message, true); } };

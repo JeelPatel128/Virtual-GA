@@ -1183,14 +1183,23 @@ def test_ga_key_rotation_logs_out_old_key_immediately():
         assert c.post("/api/ga/login", headers=NEW_GA).status_code == 200
         assert c.get("/api/admin/status", headers=A).json()["ga_key_rotated"] is True
 
-        # restore the fixed test key so every later test (which all use GA = "gakey")
-        # keeps working regardless of execution order
+        # reset: clears the override, reverting to the Render env var immediately -
+        # also restores the fixed test key so every later test (which all use
+        # GA = "gakey") keeps working regardless of execution order
+        rr = c.post("/api/admin/ga-key/reset", headers=A)
+        assert rr.status_code == 200
+        assert c.get("/api/admin/status", headers=A).json()["ga_key_rotated"] is False
+        assert c.get("/api/ga/tickets", headers=NEW_GA).status_code == 401  # rotated key is dead now
+        assert c.get("/api/ga/tickets", headers=GA).status_code == 200  # env-var key works again
+
         db = SessionLocal()
         row = db.get(KV, "ga_key_override")
         if row:
             db.delete(row)
         db.commit(); db.close()
-        assert c.get("/api/ga/tickets", headers=GA).status_code == 200
+
+        # resetting when there's nothing to reset is a harmless no-op, not an error
+        assert c.post("/api/admin/ga-key/reset", headers=A).status_code == 200
     print("GA key rotation test passed")
 
 

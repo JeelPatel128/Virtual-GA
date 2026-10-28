@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 
 from . import approvals, directory, inventory, knowledge, llm, retention, schedule, storage, teams, tickets, tokens
 from .config import BASE_DIR, load_team, settings
-from .db import (ApprovalLog, ChatSession, Doc, Item, Message, Person, QueryLog, SessionLocal, TaskFile,
+from .db import (ApprovalLog, ChatSession, Doc, Item, KV, Message, Person, QueryLog, SessionLocal, TaskFile,
                  Ticket, get_today_note, init_db, kv_get, kv_set, set_today_note, utcnow)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -1260,6 +1260,18 @@ def rotate_ga_key(db=Depends(get_db)):
     kv_set(db, "ga_key_override", new_key)
     db.commit()
     return {"ga_key": new_key}
+
+
+@app.post("/api/admin/ga-key/reset", dependencies=[Depends(require_admin)])
+def reset_ga_key(db=Depends(get_db)):
+    """Clears the database override, reverting to the GA_KEY env var set on Render.
+    Takes effect immediately, same as a rotation - anyone signed in with a rotated
+    database key is logged out on their next request and needs the Render key."""
+    row = db.get(KV, "ga_key_override")
+    if row:
+        db.delete(row)
+        db.commit()
+    return {"ok": True}
 
 
 # ---------------- cron ----------------

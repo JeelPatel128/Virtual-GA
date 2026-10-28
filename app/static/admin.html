@@ -131,6 +131,12 @@
         <p class="hint">Missed deadlines, snoozes, reassignments and avg time to done, trailing 7 days. Sent automatically every Monday.</p>
         <div id="wStats"></div></div>
       <button class="btn ghost" id="sendWeekly">Send this week's report to Teams now</button><span class="msgline" id="wMsg"></span>
+      <div class="card" style="margin-top:14px"><h2>Monthly export</h2>
+        <p class="hint">Questions, answered-by-bot %, handoffs, avg response, tasks, escalations, and top topics.
+        Aggregate counts only - never a name, email, or phone number. Saved automatically on the 1st of each month.</p>
+        <div id="exportsList"></div>
+        <button class="btn quiet" id="runExport" style="margin-top:10px">Generate last month's export now</button>
+        <span class="msgline" id="exportMsg"></span></div>
     </section>
 
     <section id="setup">
@@ -359,9 +365,32 @@ async function loadDigest() {
   $("wStats").innerHTML = w.names.length ? `<table><tr><th>GA</th><th>Missed deadlines</th><th>Snoozes</th><th>Reassigned away</th><th>Avg time to done</th></tr>${
     w.names.map(n => `<tr><td>${esc(n)}</td><td>${w.missed_deadlines[n]}</td><td>${w.snoozes[n]}</td><td>${w.reassigned_away[n]}</td>
     <td>${w.avg_time_to_done_min[n] == null ? "n/a" : w.avg_time_to_done_min[n] + " min"}</td></tr>`).join("")}</table>` : '<p class="hint">No GAs configured.</p>';
+
+  const ex = await api("/api/admin/exports");
+  $("exportsList").innerHTML = ex.exports.length ? `<table><tr><th>Month</th><th>Saved</th><th></th></tr>${
+    ex.exports.map(e => `<tr><td>${esc(e.month)}</td><td>${esc(e.created_at)}</td>
+    <td><button class="btn small quiet" data-dl="${e.id}" data-month="${esc(e.month)}">Download</button></td></tr>`).join("")}</table>`
+    : '<p class="hint">None yet - the first runs automatically on the 1st of next month.</p>';
+  $("exportsList").querySelectorAll("[data-dl]").forEach(b => b.onclick = () => downloadExport(b.dataset.dl, b.dataset.month));
+}
+async function downloadExport(id, month) {
+  try {
+    const r = await fetch(`/api/admin/exports/${id}/download`, { headers: { "X-Admin-Key": key } });
+    if (!r.ok) throw new Error("Download failed");
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `virtual-ga-${month}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (er) { flash("exportMsg", er.message, true); }
 }
 $("sendDigest").onclick = async () => { try { await api("/api/admin/digest/send", { method: "POST" }); flash("dMsg", " Sent"); } catch (er) { flash("dMsg", " " + er.message, true); } };
 $("sendWeekly").onclick = async () => { try { await api("/api/admin/weekly-report/send", { method: "POST" }); flash("wMsg", " Sent"); } catch (er) { flash("wMsg", " " + er.message, true); } };
+$("runExport").onclick = async () => {
+  try { const r = await api("/api/admin/exports/run", { method: "POST" }); flash("exportMsg", `Generated for ${r.month}`); loadDigest(); }
+  catch (er) { flash("exportMsg", er.message, true); }
+};
 
 async function loadSetup() {
   const s = await api("/api/admin/status");

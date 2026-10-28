@@ -1,4 +1,6 @@
 """Handoffs, GA responses, 5-minute escalation to the lead, the daily digest and data cleanup."""
+import csv
+import io
 import json
 import logging
 import smtplib
@@ -10,8 +12,8 @@ from sqlalchemy import func, select, update
 
 from . import retention, schedule, storage, teams, tokens
 from .config import lead_ga, load_team, settings
-from .db import (ApprovalLog, ChatSession, Item, Message, QueryLog, ReminderLog, TaskFile, Ticket,
-                 get_today_note, kv_get, kv_set, utcnow)
+from .db import (ApprovalLog, ChatSession, Item, Message, MonthlyExport, QueryLog, ReminderLog, TaskFile, Ticket,
+                 TopicCount, get_today_note, kv_get, kv_set, utcnow)
 
 log = logging.getLogger("virtual_ga.tickets")
 TZ = ZoneInfo(settings.TIMEZONE)
@@ -714,6 +716,70 @@ def maybe_send_weekly_report(db, now: datetime) -> bool:
     return True
 
 
+def monthly_export_data(db, month_start_local: datetime) -> dict:
+    """The PREVIOUS calendar month's stats, aggregate counts only - never a name, email,
+    or phone number, so the result is always safe to export. Top topics merges QueryLog
+    (most of the month's rows - the retention job's query_log_days default, 180 days,
+    is far longer than a month) with TopicCount (in case an admin shortened that period
+    enough to already have rolled some of the month up)."""
+    this_month_start = month_start_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    start_local = (this_month_start - timedelta(days=1)).replace(day=1)
+    end_local = this_month_start
+    start, end = (d.astimezone(ZoneInfo("UTC")).replace(tzinfo=None) for d in (start_local, end_local))
+    month_key = start_local.strftime("%Y-%m")
+
+    q = db.scalars(select(QueryLog).where(QueryLog.created_at >= start, QueryLog.created_at < end)).all()
+    tk = db.scalars(select(Ticket).where(Ticket.created_at >= start, Ticket.created_at < end)).all()
+    resp_mins = [(t.first_response_at - t.created_at).total_seconds() / 60 for t in tk if t.first_response_at]
+
+    topics: dict[str, int] = {}
+    for x in q:
+        cat = x.category or "Unanswered"
+        topics[cat] = topics.get(cat, 0) + 1
+    for row in db.scalars(select(TopicCount).where(TopicCount.month == month_key)).all():
+        topics[row.category] = topics.get(row.category, 0) + row.count
+
+    return {
+        "month": month_key,
+        "questions": len(q),
+        "answered_by_bot_pct": round(100 * sum(1 for x in q if x.confident) / len(q), 1) if q else None,
+        "handoffs": len(tk),
+        "avg_response_min": round(sum(resp_mins) / len(resp_mins), 1) if resp_mins else None,
+        "tasks": sum(1 for t in tk if t.kind == "task"),
+        "escalations": sum(1 for t in tk if t.escalated_at and t.on_shift),
+        "top_topics": sorted(topics.items(), key=lambda x: x[1], reverse=True)[:10],
+    }
+
+
+def monthly_export_csv(d: dict) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["month", "questions", "answered_by_bot_pct", "handoffs", "avg_response_min",
+               "tasks", "escalations"])
+    w.writerow([d["month"], d["questions"], d["answered_by_bot_pct"], d["handoffs"],
+               d["avg_response_min"], d["tasks"], d["escalations"]])
+    w.writerow([])
+    w.writerow(["top_topic", "count"])
+    for topic, count in d["top_topics"]:
+        w.writerow([topic, count])
+    return buf.getvalue()
+
+
+def maybe_run_monthly_export(db, now: datetime) -> bool:
+    """The 1st of the month only, once per calendar month - same once-per-period KV
+    pattern as the daily digest and weekly report."""
+    if now.day != 1:
+        return False
+    month_key = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    if kv_get(db, "monthly_export_month") == month_key:
+        return False
+    data = monthly_export_data(db, now)
+    db.add(MonthlyExport(month=data["month"], csv_text=monthly_export_csv(data)))
+    kv_set(db, "monthly_export_month", month_key)
+    db.commit()
+    return True
+
+
 def _next_owner_for_handoff() -> str | None:
     on_shift = schedule.on_shift_now()
     if on_shift:
@@ -848,7 +914,7 @@ def check_shift_starts(db) -> int:
 
 def tick(db) -> dict:
     result = {"escalated": check_reminders(db), "digest_sent": False, "phones_purged": 0, "task_files_purged": 0,
-              "weekly_report_sent": False, "retention": None}
+              "weekly_report_sent": False, "retention": None, "monthly_export_run": False}
     result["shift_ends_handled"] = check_shift_ends(db)
     result["shift_starts_handled"] = check_shift_starts(db)
     result["task_headsups_sent"] = check_task_heads_up(db)
@@ -862,6 +928,7 @@ def tick(db) -> dict:
         result["phones_purged"] = purge_old_phone_numbers(db, days=periods["phone_days"])  # once a day is plenty
         result["task_files_purged"] = purge_old_task_files(db, days=periods["file_days"])  # once a day is plenty
         result["weekly_report_sent"] = maybe_send_weekly_report(db, now)
+        result["monthly_export_run"] = maybe_run_monthly_export(db, now)
         result["retention"] = retention.run(db)
         db.commit()
     return result

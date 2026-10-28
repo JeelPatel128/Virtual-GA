@@ -203,6 +203,11 @@ def approve_page(ticket_id: int):
     return FileResponse(STATIC / "approve.html")
 
 
+@app.get("/privacy")
+def privacy_page():
+    return FileResponse(STATIC / "privacy.html")
+
+
 @app.get("/qr.png")
 def qr_png():
     import qrcode
@@ -1184,6 +1189,40 @@ def admin_weekly_report(db=Depends(get_db)):
 @app.post("/api/admin/weekly-report/send", dependencies=[Depends(require_admin)])
 def admin_weekly_report_send(db=Depends(get_db)):
     return tickets.send_weekly_report(db)
+
+
+@app.get("/api/admin/exports", dependencies=[Depends(require_admin)])
+def list_monthly_exports(db=Depends(get_db)):
+    from .db import MonthlyExport
+    rows = db.scalars(select(MonthlyExport).order_by(MonthlyExport.month.desc())).all()
+    return {"exports": [{"id": r.id, "month": r.month,
+                         "created_at": tickets.local(r.created_at).strftime("%b %d %I:%M %p")} for r in rows]}
+
+
+@app.post("/api/admin/exports/run", dependencies=[Depends(require_admin)])
+def run_monthly_export_now(db=Depends(get_db)):
+    """Generates (or regenerates) the last completed calendar month's export
+    immediately, for checking the format without waiting for the 1st. Does not touch
+    the once-per-month KV guard the automatic run on the 1st uses."""
+    from .db import MonthlyExport
+    data = tickets.monthly_export_data(db, datetime.now(tickets.TZ))
+    existing = db.scalar(select(MonthlyExport).where(MonthlyExport.month == data["month"]))
+    if existing:
+        existing.csv_text = tickets.monthly_export_csv(data)
+    else:
+        db.add(MonthlyExport(month=data["month"], csv_text=tickets.monthly_export_csv(data)))
+    db.commit()
+    return {"month": data["month"]}
+
+
+@app.get("/api/admin/exports/{export_id}/download", dependencies=[Depends(require_admin)])
+def download_monthly_export(export_id: int, db=Depends(get_db)):
+    from .db import MonthlyExport
+    row = db.get(MonthlyExport, export_id)
+    if not row:
+        raise HTTPException(404)
+    return Response(row.csv_text, media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="virtual-ga-{row.month}.csv"'})
 
 
 @app.post("/api/admin/test-teams", dependencies=[Depends(require_admin)])

@@ -215,6 +215,17 @@ class StaffApprovalLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class MonthlyExport(Base):
+    """One CSV snapshot per calendar month (app/tickets.py::maybe_run_monthly_export,
+    run on the 1st). Aggregate counts only - never a name, email, or phone number - so
+    it's safe to download straight from the admin panel."""
+    __tablename__ = "monthly_exports"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    month: Mapped[str] = mapped_column(String(7), unique=True, index=True)  # "YYYY-MM"
+    csv_text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class QueryLog(Base):
     """Every question asked to the bot, for the daily digest and the 'questions to add' list.
     Deleted by the retention job once past its window (see app/retention.py) - category is

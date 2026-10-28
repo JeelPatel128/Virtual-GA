@@ -1081,6 +1081,7 @@ def test_retention_preview_mode_and_real_anonymization():
 
         db = SessionLocal()
         retention.set_periods(db, visitor_days=retention.DEFAULT_VISITOR_DAYS)  # restore for later tests
+        retention.set_enabled(db, False)  # don't leave real anonymization running for the rest of the suite
         db.close()
     print("retention preview/apply test passed")
 
@@ -1493,6 +1494,86 @@ def test_digest_additions_and_weekly_report():
             db.delete(rl)
         db.commit(); db.close()
     print("digest additions + weekly report test passed")
+
+
+def test_monthly_export_data_csv_and_gating():
+    """app/tickets.py::monthly_export_data/monthly_export_csv/maybe_run_monthly_export -
+    aggregate counts only (never a name/email/phone), gated to the 1st of the month,
+    once per month, same KV pattern as the daily digest/weekly report."""
+    from sqlalchemy import select
+    from app.db import ChatSession as _ChatSession, MonthlyExport as _MonthlyExport
+    from app.db import QueryLog as _QueryLog, TopicCount as _TopicCount, kv_set as db_kv_set
+
+    with TestClient(app) as c:
+        db = SessionLocal()
+        # a month well over a year ago - guaranteed not to be "this month" (where every
+        # other test's own ambient activity, created at real wall-clock "now", lands)
+        far_month_start = (datetime.now(timezone.utc).replace(day=1, tzinfo=None) - timedelta(days=400)
+                          ).replace(day=1)
+        far_mid = far_month_start + timedelta(days=14)
+        far_month_key = far_month_start.strftime("%Y-%m")
+        next_month_start = (far_month_start + timedelta(days=32)).replace(day=1)
+
+        sess = _ChatSession(visitor_name="Secret Name", created_at=far_mid)
+        db.add(sess); db.flush()
+        t1 = Ticket(session_id=sess.id, question="q", kind="visitor", status="done",
+                   created_at=far_mid, first_response_at=far_mid + timedelta(minutes=4),
+                   requester_email="secret@stevens.edu")
+        t2 = Ticket(session_id=sess.id, question="q2", kind="task", status="done",
+                   created_at=far_mid, escalated_at=far_mid, on_shift=["GA Two"])
+        ql1 = _QueryLog(session_id=sess.id, question="where is the printer", confident=True,
+                        category="Printing", created_at=far_mid)
+        ql2 = _QueryLog(session_id=sess.id, question="where is the printer again", confident=True,
+                        category="Printing", created_at=far_mid)
+        ql3 = _QueryLog(session_id=sess.id, question="unanswerable", confident=False,
+                        category=None, created_at=far_mid)
+        db.add_all([t1, t2, ql1, ql2, ql3])
+        db.commit()
+
+        next_month_noon = next_month_start.replace(hour=12, tzinfo=tickets.TZ)
+        data = tickets.monthly_export_data(db, next_month_noon)
+        assert data["month"] == far_month_key
+        assert data["questions"] == 3
+        assert data["answered_by_bot_pct"] == round(100 * 2 / 3, 1)
+        assert data["handoffs"] == 2 and data["tasks"] == 1 and data["escalations"] == 1
+        assert data["avg_response_min"] == 4.0
+        topics = dict(data["top_topics"])
+        assert topics["Printing"] == 2 and topics["Unanswered"] == 1
+
+        csv_text = tickets.monthly_export_csv(data)
+        assert "Secret Name" not in csv_text and "secret@stevens.edu" not in csv_text
+        assert far_month_key in csv_text and "Printing" in csv_text
+
+        # merges already-rolled-up TopicCount rows for the same month too
+        tc = _TopicCount(category="Printing", month=far_month_key, count=5)
+        db.add(tc); db.commit()
+        data2 = tickets.monthly_export_data(db, next_month_noon)
+        assert dict(data2["top_topics"])["Printing"] == 7  # 2 live QueryLog rows + 5 rolled up
+
+        # --- once-per-month gating, 1st of the month only ---
+        not_the_1st = next_month_start.replace(day=2, hour=12, tzinfo=tickets.TZ)
+        assert tickets.maybe_run_monthly_export(db, not_the_1st) is False
+        the_1st = next_month_start.replace(hour=9, tzinfo=tickets.TZ)
+        assert tickets.maybe_run_monthly_export(db, the_1st) is True
+        assert tickets.maybe_run_monthly_export(db, the_1st) is False  # same month, not re-run
+        saved = db.scalar(select(_MonthlyExport).where(_MonthlyExport.month == far_month_key))
+        assert saved is not None and "Secret Name" not in saved.csv_text
+        db_kv_set(db, "monthly_export_month", "")  # don't leak into other tests' /tasks/tick calls
+        db.commit()
+
+        # --- admin endpoints: list, run-now, download ---
+        exports = c.get("/api/admin/exports", headers=A).json()["exports"]
+        assert any(e["month"] == far_month_key for e in exports)
+        export_id = next(e["id"] for e in exports if e["month"] == far_month_key)
+        dl = c.get(f"/api/admin/exports/{export_id}/download", headers=A)
+        assert dl.status_code == 200 and dl.headers["content-type"].startswith("text/csv")
+        assert "Secret Name" not in dl.text
+        assert c.get(f"/api/admin/exports/{export_id + 10000}/download", headers=A).status_code == 404
+
+        db.delete(t1); db.delete(t2); db.delete(sess)
+        db.delete(ql1); db.delete(ql2); db.delete(ql3); db.delete(tc); db.delete(saved)
+        db.commit(); db.close()
+    print("monthly export test passed")
 
 
 FAQ_FIXTURE_CSV = (
@@ -2228,9 +2309,12 @@ def test_find_emails_script_pure_functions():
 def test_full_flow():
     with TestClient(app) as c:
         # pages and QR
-        for p in ["/", "/ga", "/admin", "/ga/ticket/1", "/healthz"]:
+        for p in ["/", "/ga", "/admin", "/ga/ticket/1", "/healthz", "/privacy"]:
             assert c.get(p).status_code == 200, p
         assert c.get("/qr.png").headers["content-type"] == "image/png"
+
+        # the visitor page's privacy notice links to the privacy page
+        assert '/privacy' in c.get("/").text
 
         # admin auth
         assert c.post("/api/admin/login", headers={"X-Admin-Key": "nope"}).status_code == 401
@@ -2409,6 +2493,7 @@ if __name__ == "__main__":
     test_file_cleared_on_done_and_fourteen_day_sweep()
     test_requester_confirmation_page()
     test_digest_additions_and_weekly_report()
+    test_monthly_export_data_csv_and_gating()
     test_faq_bulk_import()
     test_task_heads_up_fires_once_30_min_before_due()
     test_directory_import_upserts_and_preserves_edits()

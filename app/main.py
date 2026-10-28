@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import re
+import secrets
 import tempfile
 import threading
 from contextlib import asynccontextmanager
@@ -87,8 +88,16 @@ def require_admin(x_admin_key: str | None = Header(None)):
         raise HTTPException(401, "Wrong admin password")
 
 
-def require_ga(x_ga_key: str | None = Header(None)):
-    if not (_eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD)):
+def get_effective_ga_key(db) -> str:
+    """A rotated key (admin "Rotate GA key" button) overrides the GA_KEY env var -
+    Render env vars can't be changed from inside the running app, so the override lives
+    in KV instead. Checked fresh on every request, not cached, so a rotation takes
+    effect immediately for everyone."""
+    return kv_get(db, "ga_key_override") or settings.GA_KEY
+
+
+def require_ga(x_ga_key: str | None = Header(None), db=Depends(get_db)):
+    if not (_eq(x_ga_key, get_effective_ga_key(db)) or _eq(x_ga_key, settings.ADMIN_PASSWORD)):
         raise HTTPException(401, "Wrong GA key")
 
 
@@ -119,30 +128,33 @@ def _login_rate_limit(db, kind: str, ok: bool) -> None:
     db.commit()
 
 
-def _staff_or_ga_key(x_ga_key: str | None) -> bool:
-    return _eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD)
+def _staff_or_ga_key(db, x_ga_key: str | None) -> bool:
+    return _eq(x_ga_key, get_effective_ga_key(db)) or _eq(x_ga_key, settings.ADMIN_PASSWORD)
 
 
-def ga_action_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None)):
+def ga_action_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None),
+                     db=Depends(get_db)):
     """The GA console's own ticket page and its claim/action/ask-staff/file endpoints -
     reached from a Teams card's "Open and respond" link, which carries a 7-day
     "ga_action"-purpose token. A status/download/staff_approve token (or anything else)
     doesn't work here, same as this doesn't work on those routes."""
-    if _staff_or_ga_key(x_ga_key):
+    if _staff_or_ga_key(db, x_ga_key):
         return
     if not tokens.verify_token(t, "ga_action", ticket_id):
         raise HTTPException(401, "This link is not valid")
 
 
-def status_token_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None)):
-    if _staff_or_ga_key(x_ga_key):
+def status_token_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None),
+                        db=Depends(get_db)):
+    if _staff_or_ga_key(db, x_ga_key):
         return
     if not tokens.verify_token(t, "status", ticket_id):
         raise HTTPException(401, "This link is not valid")
 
 
-def download_token_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None)):
-    if _staff_or_ga_key(x_ga_key):
+def download_token_access(ticket_id: int, t: str | None = Query(None), x_ga_key: str | None = Header(None),
+                          db=Depends(get_db)):
+    if _staff_or_ga_key(db, x_ga_key):
         return
     if not tokens.verify_token(t, "download", ticket_id):
         raise HTTPException(401, "This link is not valid")
@@ -153,7 +165,7 @@ def staff_approve_access(ticket_id: int, t: str | None = Query(None), x_ga_key: 
     """GET-safe: only checks the link is currently valid (right purpose/ticket, signature
     intact, not expired, not already used). Never marks it used - the route itself does
     that, and only once a decision is actually submitted."""
-    if _staff_or_ga_key(x_ga_key):
+    if _staff_or_ga_key(db, x_ga_key):
         return
     if not t or not tokens.check_staff_link(db, t, ticket_id):
         raise HTTPException(401, "This link isn't valid - it may have already been used or expired.")
@@ -581,8 +593,9 @@ def _ticket_json(db, t: Ticket, full: bool) -> dict:
 
 
 @app.get("/api/ga/team")
-def ga_team(tid: int | None = None, t: str | None = None, x_ga_key: str | None = Header(None)):
-    ok = _eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD) or \
+def ga_team(tid: int | None = None, t: str | None = None, x_ga_key: str | None = Header(None),
+           db=Depends(get_db)):
+    ok = _eq(x_ga_key, get_effective_ga_key(db)) or _eq(x_ga_key, settings.ADMIN_PASSWORD) or \
         (tid is not None and tokens.verify_token(t, "ga_action", tid))
     if not ok:
         raise HTTPException(401, "Wrong GA key")
@@ -856,7 +869,7 @@ def admin_login(x_admin_key: str | None = Header(None), db=Depends(get_db)):
 
 @app.post("/api/ga/login")
 def ga_login(x_ga_key: str | None = Header(None), db=Depends(get_db)):
-    ok = _eq(x_ga_key, settings.GA_KEY) or _eq(x_ga_key, settings.ADMIN_PASSWORD)
+    ok = _eq(x_ga_key, get_effective_ga_key(db)) or _eq(x_ga_key, settings.ADMIN_PASSWORD)
     _login_rate_limit(db, "ga", ok)
     if not ok:
         raise HTTPException(401, "Wrong GA key")
@@ -1193,7 +1206,21 @@ def admin_status(db=Depends(get_db)):
             "calendar_configured": bool(settings.GCAL_ICS_URL), "public_url": settings.PUBLIC_BASE_URL,
             "people_count": people_count, "rooms_count": rooms_count,
             "tables_without_rls": rls_status(),
+            "ga_key_rotated": bool(kv_get(db, "ga_key_override")),
             **tickets.stats(db)}
+
+
+@app.post("/api/admin/ga-key/rotate", dependencies=[Depends(require_admin)])
+def rotate_ga_key(db=Depends(get_db)):
+    """Generates a new GA key and stores it as an override (Render env vars can't be
+    changed from here) - shown once in the response, never retrievable again after
+    this, so it must be copied out and given to the team right away. Takes effect
+    immediately: every GA console currently signed in with the old key is logged out on
+    its next request and needs the new one."""
+    new_key = secrets.token_urlsafe(18)
+    kv_set(db, "ga_key_override", new_key)
+    db.commit()
+    return {"ga_key": new_key}
 
 
 # ---------------- cron ----------------

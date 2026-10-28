@@ -1153,6 +1153,46 @@ def test_admin_audit_log_covers_writes_not_reads_or_login():
     print("admin audit log test passed")
 
 
+def test_ga_key_rotation_logs_out_old_key_immediately():
+    """app/main.py::rotate_ga_key - GA_KEY itself (a Render env var) can't be changed
+    from inside the app, so a rotation stores an override in KV (get_effective_ga_key)
+    that's checked ahead of the env var on every request, no caching - the old key stops
+    working the moment the override is written, and the new one works right away."""
+    from app.db import KV
+
+    GA = {"X-GA-Key": "gakey"}
+    with TestClient(app) as c:
+        assert c.get("/api/admin/status", headers=A).json()["ga_key_rotated"] is False
+        assert c.get("/api/ga/tickets", headers=GA).status_code == 200
+
+        r = c.post("/api/admin/ga-key/rotate", headers=A)
+        assert r.status_code == 200
+        new_key = r.json()["ga_key"]
+        assert new_key and new_key != "gakey"
+
+        # the old env-var key no longer works anywhere GA auth is checked...
+        assert c.get("/api/ga/tickets", headers=GA).status_code == 401
+        assert c.post("/api/ga/login", headers=GA).status_code == 401
+        # ...but the admin password still works as a GA key too (it's always an alternate)
+        assert c.get("/api/ga/tickets", headers={"X-GA-Key": "adminpw"}).status_code == 200
+
+        # ...while the new one works immediately, no restart needed
+        NEW_GA = {"X-GA-Key": new_key}
+        assert c.get("/api/ga/tickets", headers=NEW_GA).status_code == 200
+        assert c.post("/api/ga/login", headers=NEW_GA).status_code == 200
+        assert c.get("/api/admin/status", headers=A).json()["ga_key_rotated"] is True
+
+        # restore the fixed test key so every later test (which all use GA = "gakey")
+        # keeps working regardless of execution order
+        db = SessionLocal()
+        row = db.get(KV, "ga_key_override")
+        if row:
+            db.delete(row)
+        db.commit(); db.close()
+        assert c.get("/api/ga/tickets", headers=GA).status_code == 200
+    print("GA key rotation test passed")
+
+
 def test_storage_module_degrades_and_builds_correct_requests():
     """app/storage.py: offline tests only, no real network calls. Mocks requests.* to
     check it builds the right calls, and confirms it degrades gracefully (returns None /
@@ -2363,6 +2403,7 @@ if __name__ == "__main__":
     test_retention_preview_mode_and_real_anonymization()
     test_login_rate_limit_locks_after_five_failures()
     test_admin_audit_log_covers_writes_not_reads_or_login()
+    test_ga_key_rotation_logs_out_old_key_immediately()
     test_storage_module_degrades_and_builds_correct_requests()
     test_task_request_creation_and_file_privacy()
     test_file_cleared_on_done_and_fourteen_day_sweep()

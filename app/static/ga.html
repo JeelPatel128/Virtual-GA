@@ -136,7 +136,21 @@ async function ticketView(force) {
         <button type="button" class="btn ghost" id="askStaffBtn">Ask staff to approve</button>
       </div>
       <div class="hint" id="askStaffMsg"></div>` : ""}
-      ${open && mine && t.kind !== "approval" ? `<div class="btns">
+      ${open && mine && t.kind === "pickup" ? `<div class="facts" style="margin-top:8px">
+        <span>Location: ${esc(t.task.location || "not set")}</span>
+        <span>${t.task.sensitive ? "Sensitive" : "Not sensitive"}</span>
+        ${t.task.sensitive ? `<span>Handover: ${t.task.handover_mode === "in_person" ? "GA in person" : "Tell location after code"}</span>` : ""}
+        <span>${t.task.locked ? "Locked (3 wrong codes)" : t.task.ready ? "Ready" : "Not ready yet"}</span>
+      </div>
+      <div class="btns" style="margin-top:8px">
+        ${!t.task.ready || t.task.locked ? `<button class="btn" id="markReadyBtn">${t.task.locked ? "Issue a new code" : "Mark ready"}</button>` : ""}
+        <button class="btn quiet" data-a="resolve">Mark resolved</button>
+      </div>
+      <div class="hint" id="pickupMsg"></div>` : ""}
+      ${!open && t.kind === "task" && t.status === "done" ? `<div class="btns">
+        <button class="btn quiet" id="makePickupBtn">Make pickup</button>
+      </div>` : ""}
+      ${open && mine && t.kind !== "approval" && t.kind !== "pickup" ? `<div class="btns">
         <button class="btn" data-a="on_my_way" data-m="2">On my way (2 min)</button>
         <button class="btn" data-a="on_my_way" data-m="5">On my way (5 min)</button>
         <button class="btn ghost" data-a="on_my_way" data-m="10">10 min</button>
@@ -173,6 +187,32 @@ async function ticketView(force) {
     act(b.dataset.a, b.dataset.m ? { minutes: +b.dataset.m } : {});
   });
   if ($("claimBtn")) $("claimBtn").onclick = claim;
+  if ($("markReadyBtn")) {
+    $("markReadyBtn").onclick = async () => {
+      if (!me()) { alert("Pick your name at the top first."); return; }
+      try {
+        const r = await api(`/api/ga/ticket/${ticketId}/action${q}`,
+          { method: "POST", body: JSON.stringify({ ga_name: me(), action: "mark_ready" }) });
+        const ar = r.action_result || {};
+        $("pickupMsg").textContent = !ar.sensitive ? "Marked ready."
+          : ar.emailed ? "Emailed the pickup code to the recipient."
+          : `No email on file (or SMTP isn't set up) - pickup code: ${ar.code}. Give this to them yourself; it won't be shown again.`;
+        render(true);
+      } catch (e) { alert(e.message); }
+    };
+  }
+  if ($("makePickupBtn")) {
+    $("makePickupBtn").onclick = () => {
+      try {
+        sessionStorage.setItem("pickup_prefill", JSON.stringify({
+          recipient_name: t.visitor_name || "",
+          description: `${(t.task && t.task.type) || "Task"}: ${t.question}`.slice(0, 500),
+          from_task_id: t.id,
+        }));
+      } catch (e) {}
+      location.href = "/ga";
+    };
+  }
   if ($("replyForm")) {
     $("replyText").value = typing;
     $("replyForm").onsubmit = (e) => { e.preventDefault(); const text = $("replyText").value.trim(); if (text) { $("replyText").value = ""; act("reply", { text }); } };
@@ -266,6 +306,31 @@ async function listView(force) {
     <p class="hint">Events, closures, anything visitors might ask about today. Visible to visitors who ask.</p>
     <form id="noteForm"><textarea id="todayNote" rows="2" maxlength="500" placeholder="Nothing noted yet"></textarea>
     <button class="btn small" style="margin-top:8px">Save</button><span class="hint" id="noteMsg"></span></form></div>` +
+    `<form class="card" id="pickupForm"><h3 style="margin:0 0 10px;font-size:15px">New pickup</h3>
+    <p class="hint">Something a GA is preparing for someone to collect later - printed exam copies, etc.</p>
+    <label for="pkRecipient">Recipient name</label>
+    <input id="pkRecipient" placeholder="Search the directory, or type a name" autocomplete="off" required>
+    <div id="pkDirResults" style="margin:4px 0"></div>
+    <label for="pkEmail">Recipient email <span class="hint">(optional - for a name not in the directory)</span></label>
+    <input id="pkEmail" type="email">
+    <label for="pkDescription">Item description</label>
+    <input id="pkDescription" placeholder="e.g. MGT 330 quiz copies, 40" maxlength="500" required>
+    <label for="pkLocation">Location <span class="hint">(GA-only - never shown to a visitor before verification)</span></label>
+    <input id="pkLocation" placeholder="e.g. front desk drawer 2" maxlength="200" required>
+    <label for="pkReady">Ready time</label>
+    <input id="pkReady" type="datetime-local" required>
+    <label class="check"><input type="checkbox" id="pkSensitive"> Sensitive (needs a pickup code)</label>
+    <div id="pkHandoverWrap" style="display:none">
+      <label for="pkHandover">Handover</label>
+      <select id="pkHandover">
+        <option value="location">Tell location after code</option>
+        <option value="in_person">GA hands over in person</option>
+      </select>
+    </div>
+    <input type="hidden" id="pkFromTaskId">
+    <input type="hidden" id="pkRecipientPersonId">
+    <button class="btn small" style="margin-top:10px">Create pickup</button>
+    <span class="hint" id="pkMsg"></span></form>` +
     (d.tickets.length ? d.tickets.map(t => `
     <a class="card list-item" href="/ga/ticket/${t.id}">
       <span class="pill ${t.status}">${label[t.status] || t.status}</span>
@@ -290,6 +355,53 @@ async function listView(force) {
     try { await api("/api/ga/today-note", { method: "POST", body: JSON.stringify({ text: $("todayNote").value }) });
       $("noteMsg").textContent = "Saved"; setTimeout(() => { $("noteMsg").textContent = ""; }, 3000); }
     catch (er) { $("noteMsg").textContent = er.message; }
+  };
+
+  let prefill = null;
+  try { const raw = sessionStorage.getItem("pickup_prefill"); if (raw) { prefill = JSON.parse(raw); sessionStorage.removeItem("pickup_prefill"); } } catch (e) {}
+  if (prefill) {
+    $("pkRecipient").value = prefill.recipient_name || "";
+    $("pkDescription").value = prefill.description || "";
+    $("pkFromTaskId").value = prefill.from_task_id || "";
+  }
+  $("pkDescription").oninput = () => {
+    $("pkSensitive").checked = /\b(exam|quiz|test|midterm|final|answer key)s?\b/i.test($("pkDescription").value);
+    $("pkHandoverWrap").style.display = $("pkSensitive").checked ? "block" : "none";
+  };
+  $("pkSensitive").onchange = () => { $("pkHandoverWrap").style.display = $("pkSensitive").checked ? "block" : "none"; };
+  if (prefill) $("pkDescription").oninput();
+  let pkDirTimer;
+  $("pkRecipient").oninput = () => {
+    $("pkRecipientPersonId").value = "";
+    clearTimeout(pkDirTimer);
+    const rq = $("pkRecipient").value.trim();
+    if (!rq) { $("pkDirResults").innerHTML = ""; return; }
+    pkDirTimer = setTimeout(async () => {
+      const dr = await api(`/api/ga/directory/search?q=${encodeURIComponent(rq)}`);
+      $("pkDirResults").innerHTML = dr.results.slice(0, 5).map(p =>
+        `<button type="button" class="btn small quiet" data-pick="${p.id}" data-name="${esc(p.name)}">${esc(p.name)}</button>`).join("");
+      $("pkDirResults").querySelectorAll("[data-pick]").forEach(b => b.onclick = () => {
+        $("pkRecipient").value = b.dataset.name;
+        $("pkRecipientPersonId").value = b.dataset.pick;
+        $("pkDirResults").innerHTML = "";
+      });
+    }, 250);
+  };
+  $("pickupForm").onsubmit = async (e) => {
+    e.preventDefault();
+    if (!me()) { alert("Pick your name at the top first."); return; }
+    try {
+      const r = await api("/api/ga/pickups", { method: "POST", body: JSON.stringify({
+        ga_name: me(), recipient_name: $("pkRecipient").value.trim(),
+        recipient_person_id: $("pkRecipientPersonId").value ? +$("pkRecipientPersonId").value : null,
+        recipient_email: $("pkEmail").value.trim() || null,
+        description: $("pkDescription").value.trim(), location: $("pkLocation").value.trim(),
+        ready_time: $("pkReady").value, sensitive: $("pkSensitive").checked,
+        handover_mode: $("pkHandover").value,
+        from_task_id: $("pkFromTaskId").value ? +$("pkFromTaskId").value : null,
+      }) });
+      location.href = `/ga/ticket/${r.id}`;
+    } catch (er) { $("pkMsg").textContent = er.message; }
   };
 }
 

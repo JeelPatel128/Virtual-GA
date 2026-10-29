@@ -35,6 +35,32 @@ EMAIL_RE = re.compile(r"\bemail\b", re.I)
 AVAILABILITY_RE = re.compile(r"\bavailable\b|\b(is|are)\b[\s\w]*\b(in|here|around)\b", re.I)
 PRONOUN_RE = re.compile(r"\b(he|she|him|her|his|hers|they|them|their)\b", re.I)
 
+# A visitor introducing THEMSELVES ("I'm Prof. Mario", "this is Sarah Connor", "Dr. Chen
+# here") must never run through the person LOOKUP below - "I'm X" looks structurally
+# like "is X in" (a title word, a name) but means the opposite thing entirely. A title
+# word is a strong enough signal that the name itself doesn't need to be capitalized;
+# without one, the name MUST start with a capital letter (a real proper noun), so a
+# sentence like "I'm wondering where Mario is" isn't misread as introducing someone
+# named "wondering" - "wondering" is lowercase, so the bare pattern below never fires.
+_SELF_INTRO_TRIGGER = r"(?:[Ii]'?m|[Ii] am|[Tt]his is|[Mm]y name is)"
+_TITLE_ALT = "|".join(TITLE_WORDS)
+_NAME_WORD = r"[A-Za-z][A-Za-z'\-]*"
+SELF_INTRO_TITLED_RE = re.compile(
+    rf"\b{_SELF_INTRO_TRIGGER}\s+((?:{_TITLE_ALT})\.?\s+{_NAME_WORD}(?:\s+{_NAME_WORD})?)\b"
+    rf"|\b((?:{_TITLE_ALT})\.?\s+{_NAME_WORD}(?:\s+{_NAME_WORD})?)\s+here\b", re.I)
+SELF_INTRO_BARE_RE = re.compile(rf"\b{_SELF_INTRO_TRIGGER}\s+([A-Z][a-zA-Z'\-]*(?:\s+[A-Z][a-zA-Z'\-]*)?)\b")
+
+
+def extract_self_intro(text: str) -> str | None:
+    """Returns the claimed name ("Prof. Mario", "Sarah Connor", ...) if `text` reads as
+    a self-introduction, else None. Never verified against the directory here - see
+    callers (app/main.py::ask) for how the claimed name is stored and used."""
+    m = SELF_INTRO_TITLED_RE.search(text)
+    if m:
+        return (m.group(1) or m.group(2)).strip()
+    m = SELF_INTRO_BARE_RE.search(text)
+    return m.group(1).strip() if m else None
+
 # Common English words that are ALSO plausible first/last names in the real directory data.
 # Checked every first_name/last_name in the actual ssb_directory.csv against this risk: "an",
 # "oh", "ko", "sun", "park", "frank", "kim", "lee", "han", "diamond", "ryan", "wilson", and
@@ -488,6 +514,16 @@ def search_people(db, q: str, limit: int = 10) -> list["Person"]:
             scored.append((best, p))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [p for _, p in scored[:limit]]
+
+
+def match_person(db, text: str) -> "Person | None":
+    """Best single confident directory match for free text (the same fuzzy matching
+    resolve() uses), or None. Used by app/pickups.py to check whether a visitor's
+    claimed name resolves to the same Person a pickup's recipient was set from - never
+    used to decide what to tell a visitor about someone, only to compare two names."""
+    hits = _name_candidates(db, text)
+    strong = [c for c in hits if c[1] >= NAME_HIGH]
+    return strong[0][0] if strong else None
 
 
 def resolve(db, sess, text: str) -> dict | None:

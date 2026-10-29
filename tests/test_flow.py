@@ -2084,6 +2084,47 @@ def test_place_matching():
     print("place matching test passed")
 
 
+def test_self_introduction_vs_lookup():
+    """app/directory.py::extract_self_intro - "I'm X"/"this is X"/"my name is X"/"<title>
+    X here" is the visitor naming THEMSELVES, never a lookup for someone else. Must never
+    trigger "couldn't find anyone" for an unknown name (e.g. a visiting professor not in
+    the directory), and must store the claimed name on the session."""
+    with TestClient(app) as c:
+        _import_directory_fixture(c)
+
+        # titled phrasing, exactly the reported real-world case
+        sid = c.post("/api/session").json()["session_id"]
+        last = _ask_text(c, sid, "Hey, I'm Prof. Mario, I came to pick up my exam")
+        assert "couldn't find anyone" not in last["text"].lower(), last
+        db = SessionLocal()
+        from app.db import ChatSession as _ChatSession
+        assert db.get(_ChatSession, sid).visitor_name == "Prof. Mario"
+        db.close()
+
+        # bare phrasing (no title), a second, different self-intro shape
+        sid2 = c.post("/api/session").json()["session_id"]
+        last2 = _ask_text(c, sid2, "my name is Sarah Connor, I have a question")
+        assert "couldn't find anyone" not in last2["text"].lower(), last2
+        db = SessionLocal()
+        assert db.get(_ChatSession, sid2).visitor_name == "Sarah Connor"
+        db.close()
+
+        # a genuine lookup for someone real still resolves normally after a self-intro
+        last3 = _ask_text(c, sid, "where is Howie")
+        assert "Haoying Xu" in last3["text"], last3
+
+        # a genuine lookup for someone who DOESN'T exist still says "couldn't find" -
+        # the self-intro carve-out must not swallow real lookups
+        last4 = _ask_text(c, sid, "is Professor Nguyen in today")
+        assert "couldn't find" in last4["text"].lower(), last4
+
+        # a sentence that merely contains a trigger word but isn't a self-intro at all
+        # must not misfire ("wondering" is lowercase, not a capitalized proper name)
+        from app import directory
+        assert directory.extract_self_intro("I'm wondering where Mario is") is None
+    print("self-introduction vs lookup test passed")
+
+
 FAQ_REGRESSION_QUESTIONS = [
     "can I park here",
     "oh where is the printer",
@@ -2514,6 +2555,7 @@ if __name__ == "__main__":
     test_role_match_lists_everyone_name_match_still_asks()
     test_route_topics_here_excludes_from_role_matching()
     test_place_matching()
+    test_self_introduction_vs_lookup()
     test_common_word_gate_faq_regression()
     test_message_ticket_deadline_and_escalation()
     test_ga_directory_search()

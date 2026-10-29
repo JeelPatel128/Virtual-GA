@@ -308,14 +308,22 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
         db.commit()
         return {"relayed": True}
 
-    resolved = directory.resolve(db, sess, text)
-    if resolved is not None:
-        meta = resolved.get("meta", {})
-        tickets.say(db, sid, "bot", resolved["answer"], meta=meta)
-        db.add(QueryLog(session_id=sess.id, question=text, confident=True,
-                        category=meta.get("category", "People & offices")))
-        db.commit()
-        return {"relayed": False}
+    # A self-introduction ("I'm Prof. Mario") is the visitor naming THEMSELVES, never a
+    # lookup for someone else - store it as their claimed (unverified) identity and keep
+    # processing the rest of the message (e.g. a pickup request) instead of running it
+    # through the directory, which would otherwise answer "couldn't find anyone".
+    claimed_name = directory.extract_self_intro(text)
+    if claimed_name:
+        sess.visitor_name = claimed_name
+    else:
+        resolved = directory.resolve(db, sess, text)
+        if resolved is not None:
+            meta = resolved.get("meta", {})
+            tickets.say(db, sid, "bot", resolved["answer"], meta=meta)
+            db.add(QueryLog(session_id=sess.id, question=text, confident=True,
+                            category=meta.get("category", "People & offices")))
+            db.commit()
+            return {"relayed": False}
 
     if TODAY_NOTE_RE.search(text):
         answer = get_today_note(db) or NO_TODAY_NOTE

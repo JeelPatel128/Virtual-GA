@@ -150,6 +150,15 @@ escalation deadline is the end of the current shift instead of 5 minutes, since 
 needs to drop what they're doing - it still can't be forgotten, since it goes through the
 same escalation chain as every other ticket.
 
+**Self-introductions aren't lookups.** "I'm Prof. Mario", "this is Sarah Connor", "my name
+is Sam", or "Dr. Chen here" is the visitor naming *themselves* - structurally similar to a
+lookup ("is X in", "X's office"), but the opposite thing entirely. These are recognized
+before the directory ever runs, and the name is stored as the visitor's claimed (never
+verified) identity - a title word (prof/dr/dean/...) is signal enough on its own; without
+one, the name has to be capitalized, so an unrelated sentence doesn't get misread as
+introducing someone. A visiting professor who isn't in the directory at all no longer gets
+told "I couldn't find anyone by that name."
+
 **Finding emails.** All 105 rows start with an empty `email` column. `tools/find_emails.py`
 is a separate script you run on your own Mac (not part of the deployed app, no network
 calls happen from the live site): `python3 tools/find_emails.py`. It reads the real SSB
@@ -198,6 +207,38 @@ as lead immediately, rather than waiting for a deadline to lapse.
 items. At the actual end of shift, an item is only reassigned if its deadline falls before
 the owner's own next shift - if they'll be back in time, it stays with them. A newly
 started shift gets a card showing what's currently open.
+
+## Pickups
+
+A GA prepares something for a named recipient - printed exam copies for a professor, say -
+who collects it later, possibly when nobody's at the desk. **New pickup** on the GA
+console creates a `Ticket` (`kind="pickup"`), auto-claimed to whoever created it: recipient
+(search the directory, or type a name for someone not in it, e.g. a visiting professor),
+item description, a GA-only location (never shown to a visitor before verification), a
+ready time, and whether it's sensitive - defaults to yes if the description mentions exam,
+quiz, test, midterm, final, or answer key, a GA can always override it. A **Make pickup**
+button on a done task prefills the form from that task.
+
+**The pickup code.** When a GA marks a pickup ready, a sensitive one gets a fresh 4-digit
+code - only its hash is ever stored. It's emailed to the recipient (their directory email,
+or a typed one) if `SMTP_HOST` is set; otherwise the GA console shows the code once, to
+pass on by phone or in person. It expires after 7 days, and 3 wrong attempts locks the
+pickup and alerts whoever's on shift right now (once, not again on every attempt
+afterward) - a GA can issue a fresh code to recover. Non-sensitive pickups skip the code
+entirely once ready.
+
+**The visitor side** is entirely conversational, no form: saying something like "I'm Prof.
+Mario, I came to pick up my exam" is read as a self-introduction (see Directory above) and
+a pickup request together. A claimed name is matched against open pickups fuzzily and
+directory-aware - a name that resolves to the same person a pickup was set for counts too,
+even phrased as a different alias. A sensitive match asks for the code: the right one
+either reveals the location and closes the ticket, or - for an item that needs an in-person
+handover - alerts the on-shift GA that the recipient is at the desk and leaves the ticket
+open for them to actually hand it over. A wrong or missing code, or no matching pickup at
+all, never reveals or confirms anything; it offers a GA instead. Every verified handover
+(code, in person, or not-sensitive) is logged - who, when, how - visible in admin. A pickup
+still waiting 2+ days after its ready time shows up in the daily digest and goes through
+the same reminder ladder as everything else.
 
 ## Inventory and GA resources
 
@@ -313,6 +354,7 @@ app/tickets.py      claim, status model, reminder ladder, shift handoff, confirm
 app/knowledge.py    file reading, chunking, embeddings, search, FAQ bulk import, GA resources
 app/directory.py    person/place resolver: name, fuzzy, role matching; CSV upsert import
 app/inventory.py    front-desk inventory: CSV upsert import, "do you have X" matching, borrowing
+app/pickups.py      pickup code (hash/expiry/lockout), sensitivity, visitor-name matching
 app/storage.py      task-file attachments: Supabase Storage, with a local DB table fallback
 app/retention.py    preview-mode anonymization/rollup job, admin-settable periods
 app/tokens.py       purpose-scoped signed links (status, download, staff approve, GA console)

@@ -194,6 +194,30 @@ Supabase dev database (`DATABASE_URL_DEV`) once it became reachable.
 now read their day counts from the same admin settings panel instead of a fixed constant,
 per item 5's "all retention periods are admin settings" requirement.
 
+## Self-introductions + pickups (2026-10-29 spec, built 2026-10-29, `reliability-pack-2`)
+
+Not merged to `main`. Two items from real testing at the front desk - "Hey, I'm Prof.
+Mario, I came to pick up my exam" was treated as a directory search for "Mario" and
+answered "couldn't find anyone." Both reuse the existing `Ticket`/directory machinery,
+per JP's explicit instruction not to build a parallel system.
+
+| # | Item | Status |
+|---|---|---|
+| A | Self-introduction ("I'm X"/"this is X"/"my name is X"/"`<title>` X here") recognized and stored as the visitor's claimed (unverified) identity, never run through the directory resolver as a lookup | ✅ Done - `directory.extract_self_intro`. A title word is signal enough alone; without one the name must be capitalized, so "I'm wondering where Mario is" isn't misread as introducing "wondering." Also adds `directory.match_person`, a public wrapper around the existing fuzzy name matching, used by item B below |
+| B.1 | New ticket kind `"pickup"`: GA console "New pickup" form (directory search or typed name + optional email, description, GA-only location, ready time, sensitive default from keywords with a GA override, handover mode), auto-claimed to the creating GA; "Make pickup" button prefills from a done task | ✅ Done - `tickets.create_pickup_ticket`. `next_deadline` = ready time + 2 days, so an uncollected item reaches the existing reminder ladder on its own, no new escalation mechanism |
+| B.2 | Pickup code: 4 digits, only the hash stored, emailed (directory or typed address, if `SMTP_HOST` is set) or shown once to the GA otherwise; 7-day expiry; 3 wrong attempts locks it and alerts whoever's on shift (once, not per repeat attempt) | ✅ Done - `app/pickups.py` (code/hash/expiry/lockout logic) + `tickets.mark_pickup_ready` (the GA-facing action) |
+| B.3 | Visitor flow (conversational, no form): matched by claimed name, fuzzy and directory-aware (resolves through the same Person a pickup's recipient was set from, even via a different alias); sensitive asks for the code, "location" mode reveals it and closes the ticket, "in_person" mode alerts the on-shift GA and leaves it open; non-sensitive hands over directly; wrong/missing/no-match never reveals anything | ✅ Done. Pending-code state lives on `ChatSession.pending_pickup_id` (new column) - the next message is read as the code answer, cleared if it doesn't even look like one |
+| B.4 | Handover log (who, when, how - code / in person / not sensitive), visible in admin | ✅ Done - new `PickupLog` table + `/api/admin/pickup-log` |
+| B.5 | Uncollected (2+ days past ready) itemized in the daily digest, same reminder ladder as everything else | ✅ Done - `digest_data()`'s new `uncollected_pickups`, same pattern as `lend_not_returned` |
+| B.6 | Tests: wrong code never leaks the location; 3 wrong codes lock + alert; claiming a name without a valid code gets nothing; non-sensitive works without a code; a typed name with no email shows the code to the GA; "Make pickup" provenance (`from_task_id`); the location never appears before verification; the handover log is written; directory-aware name matching | ✅ Done, all pass |
+
+**Verification:** beyond the automated suite, the full flow (create pickup → mark ready →
+visitor self-introduces → asks to pick up → enters the code → location revealed) was run
+against a real running server over real HTTP, not just the in-process test client. The GA
+console UI itself (the new form and ticket-detail block) was not checked in an actual
+browser - no visual rendering tool was available in that session, so it's confirmed to
+serve the right markup and call the right endpoints, not confirmed to look right.
+
 ## Sustainability pack (2026-10-22, spec from outside this repo — pending)
 
 JP's spec not pasted yet. Named scope so far: admin-managed settings, health checks, content

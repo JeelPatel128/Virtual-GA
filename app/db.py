@@ -96,6 +96,10 @@ class ChatSession(Base):
     last_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pending_query: Mapped[str | None] = mapped_column(Text, nullable=True)
     pending_choices: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Pickups (migrated onto the existing table). Set while the bot is mid "what's your
+    # pickup code" exchange with this visitor - the next message is read as a code
+    # attempt rather than a normal question. See app/pickups.py.
+    pending_pickup_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Message(Base):
@@ -213,6 +217,17 @@ class StaffApprovalLink(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     used: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PickupLog(Base):
+    """Handover record for a pickup (app/pickups.py, app/tickets.py): who it was for,
+    when, and how it was verified - visible in admin."""
+    __tablename__ = "pickup_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id", ondelete="CASCADE"), index=True)
+    recipient_name: Mapped[str] = mapped_column(String(200))
+    verified_by: Mapped[str] = mapped_column(String(20))  # code | ga_in_person | not_sensitive
+    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class MonthlyExport(Base):
@@ -376,6 +391,8 @@ _MIGRATIONS = [
     ("docs", "source_file", "TEXT"),
     # Security and data retention
     ("query_log", "category", "TEXT"),
+    # Pickups
+    ("sessions", "pending_pickup_id", "INTEGER"),
 ]
 
 

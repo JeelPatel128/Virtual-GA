@@ -16,10 +16,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from . import approvals, directory, inventory, knowledge, llm, retention, schedule, storage, teams, tickets, tokens
+from . import approvals, directory, inventory, knowledge, llm, pickups, retention, schedule, storage, teams, tickets, tokens
 from .config import BASE_DIR, load_team, settings
-from .db import (ApprovalLog, ChatSession, Doc, Item, KV, Message, Person, QueryLog, SessionLocal, TaskFile,
-                 Ticket, get_today_note, init_db, kv_get, kv_set, set_today_note, utcnow)
+from .db import (ApprovalLog, ChatSession, Doc, Item, KV, Message, Person, PickupLog, QueryLog, SessionLocal,
+                 TaskFile, Ticket, get_today_note, init_db, kv_get, kv_set, set_today_note, utcnow)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("virtual_ga")
@@ -274,6 +274,91 @@ def _clean_phone(phone: str | None) -> str | None:
     return digits
 
 
+def _pickup_bot_reply(db, sid: str, sess, text: str, answer: str, meta: dict) -> dict:
+    tickets.say(db, sid, "bot", answer, meta=meta)
+    db.add(QueryLog(session_id=sess.id, question=text, confident=True, category="Pickups"))
+    db.commit()
+    return {"relayed": False}
+
+
+def _handle_pending_pickup_code(db, sid: str, sess, text: str) -> dict | None:
+    """If the session is mid "what's your pickup code" exchange, reads `text` as the
+    answer. Returns a response dict if handled this way, or None if `text` doesn't even
+    look like a code attempt - the pending state is cleared either way the caller gets
+    None, so the visitor changing the subject never gets stuck."""
+    t = db.get(Ticket, sess.pending_pickup_id)
+    m = pickups.CODE_RE.search(text)
+    if not m or not t or t.status not in tickets.OPEN_STATUSES:
+        sess.pending_pickup_id = None
+        return None
+    task = t.task or {}
+    was_locked = bool(task.get("locked"))
+    result = pickups.record_code_attempt(db, t, m.group(1))
+    if result == "ok":
+        sess.pending_pickup_id = None
+        if task.get("handover_mode") == "in_person":
+            t.status, t.next_deadline, t.last_reminder_step = "in_progress", utcnow(), 0
+            db.commit()
+            tickets.alert_ga_on_shift(
+                t, f"{task.get('recipient_name', 'Someone')} is at the desk for pickup #{t.id}",
+                task.get("description", ""))
+            answer = "Thanks - I've let the team know you're here. A GA is coming to help you."
+        else:
+            t.status, t.resolved_at = "done", utcnow()
+            db.add(PickupLog(ticket_id=t.id, recipient_name=task.get("recipient_name", ""), verified_by="code"))
+            db.commit()
+            answer = f"You're all set - it's at {task.get('location')}."
+        return _pickup_bot_reply(db, sid, sess, text, answer, {})
+    if result == "locked":
+        # pending_pickup_id stays set on purpose - a locked pickup never accepts another
+        # code attempt, correct or not, until a GA re-runs mark_ready, so every further
+        # reply here keeps landing on this same "locked" response instead of falling
+        # through to unrelated processing. The GA is alerted once, at the moment it
+        # actually locks - not again on every repeat attempt afterward.
+        if not was_locked:
+            tickets.alert_ga_on_shift(t, f"Pickup #{t.id} locked after 3 wrong code attempts",
+                                      task.get("description", ""), style="urgent")
+        return _pickup_bot_reply(db, sid, sess, text,
+                                 "That doesn't match, and I can't try again automatically. "
+                                 "Let me get a GA to help.", {"offer_handoff": True})
+    if result == "expired":
+        sess.pending_pickup_id = None
+        return _pickup_bot_reply(db, sid, sess, text, "That code has expired. Let me get a GA to help.",
+                                 {"offer_handoff": True})
+    return _pickup_bot_reply(db, sid, sess, text,  # "wrong" - stays pending, can try again
+                             "That code doesn't match. Want me to get a GA to help instead?",
+                             {"offer_handoff": True})
+
+
+def _handle_pickup_request(db, sid: str, sess, text: str) -> dict | None:
+    """A visitor saying they're here to collect something, matched by their claimed name
+    (self-introduced this turn, or given earlier on a form). Returns None if `text`
+    doesn't even look like a pickup request, so the caller falls through to the normal
+    pipeline - the location is never mentioned before the ready/sensitive checks below."""
+    if not pickups.PICKUP_INTENT_RE.search(text):
+        return None
+    if not sess.visitor_name:
+        return _pickup_bot_reply(db, sid, sess, text, "Sure - can I get your name first?", {})
+    matches = pickups.find_open_pickups_for_name(db, sess.visitor_name)
+    if not matches:
+        return _pickup_bot_reply(db, sid, sess, text,
+                                 "I don't see anything waiting for pickup under that name. "
+                                 "Want me to get a GA to check?", {"offer_handoff": True})
+    t = matches[0]
+    task = t.task or {}
+    if not task.get("ready"):
+        return _pickup_bot_reply(db, sid, sess, text,
+                                 "That's being prepared but isn't quite ready yet. Check back soon, "
+                                 "or I can get a GA.", {"offer_handoff": True})
+    if task.get("sensitive"):
+        sess.pending_pickup_id = t.id
+        return _pickup_bot_reply(db, sid, sess, text,
+                                 "This needs a quick check - what's your 4-digit pickup code?", {})
+    t.status, t.resolved_at = "done", utcnow()
+    db.add(PickupLog(ticket_id=t.id, recipient_name=task.get("recipient_name", ""), verified_by="not_sensitive"))
+    return _pickup_bot_reply(db, sid, sess, text, f"You're all set - it's at {task.get('location')}.", {})
+
+
 @app.post("/api/session")
 def new_session(db=Depends(get_db)):
     s = ChatSession()
@@ -308,6 +393,13 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
         db.commit()
         return {"relayed": True}
 
+    # Mid "what's your pickup code" exchange: the next message is read as the answer,
+    # not a new question - checked before anything else so it always takes priority.
+    if sess.pending_pickup_id:
+        pending_result = _handle_pending_pickup_code(db, sid, sess, text)
+        if pending_result is not None:
+            return pending_result
+
     # A self-introduction ("I'm Prof. Mario") is the visitor naming THEMSELVES, never a
     # lookup for someone else - store it as their claimed (unverified) identity and keep
     # processing the rest of the message (e.g. a pickup request) instead of running it
@@ -324,6 +416,10 @@ def ask(sid: str, body: AskIn, db=Depends(get_db)):
                             category=meta.get("category", "People & offices")))
             db.commit()
             return {"relayed": False}
+
+    pickup_result = _handle_pickup_request(db, sid, sess, text)
+    if pickup_result is not None:
+        return pickup_result
 
     if TODAY_NOTE_RE.search(text):
         answer = get_today_note(db) or NO_TODAY_NOTE
@@ -675,6 +771,43 @@ def ga_inventory_set_status(item_id: str, body: InventoryStatusIn, db=Depends(ge
     return _item_json(item)
 
 
+class CreatePickupIn(BaseModel):
+    ga_name: str = Field(min_length=1, max_length=120)
+    recipient_name: str = Field(min_length=1, max_length=200)
+    recipient_person_id: int | None = None
+    recipient_email: str | None = Field(None, max_length=200)
+    description: str = Field(min_length=1, max_length=500)
+    location: str = Field(min_length=1, max_length=200)
+    ready_time: str
+    sensitive: bool | None = None  # None -> default from the description's own keywords
+    handover_mode: str = "location"
+    from_task_id: int | None = None
+
+
+@app.post("/api/ga/pickups", dependencies=[Depends(require_ga)])
+def create_pickup(body: CreatePickupIn, db=Depends(get_db)):
+    try:
+        ready_dt = datetime.fromisoformat(body.ready_time)
+    except ValueError:
+        raise HTTPException(400, "That ready time isn't valid.")
+    if ready_dt.tzinfo:
+        ready_dt = ready_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    sensitive = body.sensitive if body.sensitive is not None else pickups.is_sensitive_default(body.description)
+    # The code goes to the directory email on file when the GA picked a real person and
+    # didn't type a different one - never required for a typed, not-in-directory name.
+    recipient_email = body.recipient_email
+    if not recipient_email and body.recipient_person_id:
+        person = db.get(Person, body.recipient_person_id)
+        recipient_email = person.email if person else None
+    try:
+        t = tickets.create_pickup_ticket(db, body.ga_name.strip(), body.recipient_name, body.recipient_person_id,
+                                         recipient_email, body.description, body.location, ready_dt,
+                                         sensitive, body.handover_mode, body.from_task_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _ticket_json(db, t, True)
+
+
 @app.get("/api/ga/tickets", dependencies=[Depends(require_ga)])
 def ga_tickets(include_resolved: bool = False, db=Depends(get_db)):
     q = select(Ticket).order_by(Ticket.id.desc()).limit(50)
@@ -824,11 +957,14 @@ def ga_ticket_action(ticket_id: int, body: ActionIn, db=Depends(get_db)):
     if t.status == "done":
         raise HTTPException(409, "Already resolved")
     try:
-        tickets.ga_action(db, t, body.ga_name.strip(), body.action, body.minutes, body.text,
-                         body.snooze_until, body.reason)
+        result = tickets.ga_action(db, t, body.ga_name.strip(), body.action, body.minutes, body.text,
+                                   body.snooze_until, body.reason)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return _ticket_json(db, t, True)
+    out = _ticket_json(db, t, True)
+    if result:  # e.g. mark_ready's freshly generated code, when not emailed - exists nowhere else
+        out["action_result"] = result
+    return out
 
 
 class AskStaffIn(BaseModel):
@@ -1161,6 +1297,14 @@ def get_approval_log(db=Depends(get_db)):
     rows = db.scalars(select(ApprovalLog).order_by(ApprovalLog.id.desc()).limit(100)).all()
     return {"entries": [{"id": r.id, "ticket_id": r.ticket_id, "resource_id": r.resource_id,
                          "actor": r.actor, "action": r.action, "reason": r.reason,
+                         "at": tickets.local(r.at).strftime("%b %d %I:%M %p")} for r in rows]}
+
+
+@app.get("/api/admin/pickup-log", dependencies=[Depends(require_admin)])
+def get_pickup_log(db=Depends(get_db)):
+    rows = db.scalars(select(PickupLog).order_by(PickupLog.id.desc()).limit(100)).all()
+    return {"entries": [{"id": r.id, "ticket_id": r.ticket_id, "recipient_name": r.recipient_name,
+                         "verified_by": r.verified_by,
                          "at": tickets.local(r.at).strftime("%b %d %I:%M %p")} for r in rows]}
 
 

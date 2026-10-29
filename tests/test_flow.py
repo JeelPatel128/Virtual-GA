@@ -108,6 +108,7 @@ def test_migration_adds_columns_to_old_tables():
            "source", "handled_by", "changes_each_semester", "status"} <= doc_cols
     assert {"audience", "seasonal", "linked_faq_ids", "source_file"} <= doc_cols
     assert "category" in query_log_cols
+    assert "pending_pickup_id" in session_cols
     eng.dispose()
 
 
@@ -2125,6 +2126,197 @@ def test_self_introduction_vs_lookup():
     print("self-introduction vs lookup test passed")
 
 
+def test_pickups_creation_matching_codes_and_lockout():
+    """app/pickups.py + app/tickets.py pickup support - creation, mark-ready (code
+    emailed, or shown to the GA when there's no email), visitor matching (fuzzy and
+    directory-aware), the sensitive-vs-not split, lockout after 3 wrong codes, and the
+    handover log."""
+    from sqlalchemy import select
+    from app.db import ChatSession as _ChatSession, Person as _Person, PickupLog as _PickupLog
+    from app.db import utcnow as db_utcnow3
+
+    with TestClient(app) as c:
+        GA = {"X-GA-Key": "gakey"}
+        _import_directory_fixture(c)
+        ready = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()  # already "ready" once marked
+
+        # --- 1. a typed name not in the directory ("Prof. Mario"), no email on file:
+        # mark-ready shows the code to the GA instead of emailing it ---
+        r = c.post("/api/ga/pickups", headers=GA, json={
+            "ga_name": "GA Two", "recipient_name": "Prof. Mario", "description": "MGT 330 quiz copies, 40",
+            "location": "front desk drawer 2", "ready_time": ready, "handover_mode": "location"})
+        assert r.status_code == 200, r.text
+        tid = r.json()["id"]
+        assert r.json()["task"]["sensitive"] is True  # "quiz" defaults sensitive=True
+        assert r.json()["owner"] == "GA Two"
+
+        r2 = c.post(f"/api/ga/ticket/{tid}/action", headers=GA, json={"ga_name": "GA Two", "action": "mark_ready"})
+        assert r2.status_code == 200
+        ar = r2.json()["action_result"]
+        assert ar["sensitive"] is True and ar["emailed"] is False and ar["code"] and len(ar["code"]) == 4
+        code = ar["code"]
+
+        # --- self-introduce as "Prof. Mario" and ask to pick it up ---
+        sid = c.post("/api/session").json()["session_id"]
+        last = _ask_text(c, sid, "Hey, I'm Prof. Mario, I came to pick up my exam")
+        assert "4-digit pickup code" in last["text"], last
+        assert "front desk drawer 2" not in last["text"]  # never before verification
+
+        # wrong code: no location leaked, offered a GA, ticket still open
+        teams.sent_cards.clear()
+        last_wrong = _ask_text(c, sid, "9999" if code != "9999" else "9998")
+        assert "doesn't match" in last_wrong["text"] and last_wrong["meta"].get("offer_handoff") is True
+        assert "front desk drawer 2" not in last_wrong["text"]
+        assert len(teams.sent_cards) == 0  # not locked yet - no automatic alert for a single miss
+
+        wrong2 = "9997" if code not in ("9997",) else "9996"
+        _ask_text(c, sid, wrong2)  # 2nd wrong attempt
+        teams.sent_cards.clear()
+        last_locked = _ask_text(c, sid, "0000" if code != "0000" else "0001")  # 3rd wrong -> locked
+        assert "can't try again" in last_locked["text"]
+        assert "front desk drawer 2" not in last_locked["text"]
+        assert len(teams.sent_cards) == 1 and "locked" in title(teams.sent_cards[-1])
+
+        db = SessionLocal()
+        t = db.get(Ticket, tid)
+        assert t.task["locked"] is True and t.status not in ("done", "cancelled")
+        db.close()
+
+        # even the CORRECT code is refused once locked - no recovery except a GA
+        # re-running mark_ready, matching the spec's "alert the GA" intent
+        last_after_lock = _ask_text(c, sid, code)
+        assert "can't try again" in last_after_lock["text"]
+        assert "front desk drawer 2" not in last_after_lock["text"]
+
+        # --- 2. a correct code, "location" mode: hands over the location and closes it ---
+        r3 = c.post("/api/ga/pickups", headers=GA, json={
+            "ga_name": "GA Two", "recipient_name": "Prof. Nina", "description": "Final exam copies",
+            "location": "cabinet 3", "ready_time": ready, "handover_mode": "location"})
+        tid3 = r3.json()["id"]
+        r3b = c.post(f"/api/ga/ticket/{tid3}/action", headers=GA, json={"ga_name": "GA Two", "action": "mark_ready"})
+        code3 = r3b.json()["action_result"]["code"]
+
+        sid3 = c.post("/api/session").json()["session_id"]
+        _ask_text(c, sid3, "I'm Prof. Nina")
+        last3 = _ask_text(c, sid3, "I'm here to pick up the exam")
+        assert "4-digit pickup code" in last3["text"]
+        last3b = _ask_text(c, sid3, code3)
+        assert "cabinet 3" in last3b["text"], last3b
+        db = SessionLocal()
+        assert db.get(Ticket, tid3).status == "done"
+        logged3 = db.scalars(select(_PickupLog).where(_PickupLog.ticket_id == tid3)).first()
+        assert logged3 is not None and logged3.verified_by == "code"
+        db.close()
+
+        # --- 3. "in_person" mode: correct code alerts the on-shift GA instead of
+        # revealing a location, and leaves the ticket open for a GA to actually resolve ---
+        r4 = c.post("/api/ga/pickups", headers=GA, json={
+            "ga_name": "GA Two", "recipient_name": "Prof. Omar", "description": "Midterm copies",
+            "location": "cabinet 5", "ready_time": ready, "handover_mode": "in_person"})
+        tid4 = r4.json()["id"]
+        code4 = c.post(f"/api/ga/ticket/{tid4}/action", headers=GA,
+                      json={"ga_name": "GA Two", "action": "mark_ready"}).json()["action_result"]["code"]
+        sid4 = c.post("/api/session").json()["session_id"]
+        _ask_text(c, sid4, "I'm Prof. Omar")
+        _ask_text(c, sid4, "here to pick up my copies")
+        teams.sent_cards.clear()
+        last4 = _ask_text(c, sid4, code4)
+        assert "cabinet 5" not in last4["text"]
+        assert "coming to help" in last4["text"]
+        assert len(teams.sent_cards) == 1 and "at the desk" in teams.sent_cards[-1]["attachments"][0]["content"]["body"][0]["text"]
+        db = SessionLocal()
+        assert db.get(Ticket, tid4).status == "in_progress"  # NOT done - a GA still has to act
+        db.close()
+
+        # --- 4. non-sensitive: no code needed, location given directly ---
+        r5 = c.post("/api/ga/pickups", headers=GA, json={
+            "ga_name": "GA Two", "recipient_name": "Prof. Pat", "description": "Syllabus printouts",
+            "location": "shelf 1", "ready_time": ready, "handover_mode": "location", "sensitive": False})
+        tid5 = r5.json()["id"]
+        assert r5.json()["task"]["sensitive"] is False
+        c.post(f"/api/ga/ticket/{tid5}/action", headers=GA, json={"ga_name": "GA Two", "action": "mark_ready"})
+        sid5 = c.post("/api/session").json()["session_id"]
+        _ask_text(c, sid5, "I'm Prof. Pat")
+        last5 = _ask_text(c, sid5, "picking up the syllabus printouts")
+        assert "shelf 1" in last5["text"]
+        db = SessionLocal()
+        assert db.get(Ticket, tid5).status == "done"
+        logged5 = db.scalars(select(_PickupLog).where(_PickupLog.ticket_id == tid5)).first()
+        assert logged5 is not None and logged5.verified_by == "not_sensitive"
+        db.close()
+
+        # --- 5. no matching pickup under an unrelated name: nothing confirmed or denied ---
+        sid6 = c.post("/api/session").json()["session_id"]
+        _ask_text(c, sid6, "I'm Dakota Nobody")
+        last6 = _ask_text(c, sid6, "I'm here to pick something up")
+        assert "don't see anything waiting" in last6["text"]
+        assert last6["meta"].get("offer_handoff") is True
+
+        # --- 6. not ready yet: never offers a code or a location ---
+        r7 = c.post("/api/ga/pickups", headers=GA, json={
+            "ga_name": "GA Two", "recipient_name": "Prof. Quinn", "description": "Lab handouts",
+            "location": "shelf 2", "ready_time": ready, "handover_mode": "location", "sensitive": False})
+        sid7 = c.post("/api/session").json()["session_id"]
+        _ask_text(c, sid7, "I'm Prof. Quinn")
+        last7 = _ask_text(c, sid7, "here to pick up my handouts")
+        assert "isn't quite ready yet" in last7["text"]
+        assert "shelf 2" not in last7["text"]
+
+        # --- 7. directory-aware matching: a pickup set for a real directory person
+        # matches even when the visitor introduces themselves with a different alias of
+        # that SAME person (not just a fuzzy string match on the name itself) ---
+        db = SessionLocal()
+        xu = db.scalar(select(_Person).where(_Person.name == "Haoying Xu"))
+        xu.email = "xu-test-fixture@stevens.edu"  # fixture row has none on file by default
+        db.commit()
+        db.close()
+        r8 = c.post("/api/ga/pickups", headers=GA, json={
+            "ga_name": "GA Two", "recipient_name": "Haoying Xu", "recipient_person_id": xu.id,
+            "description": "Office supplies", "location": "shelf 3", "ready_time": ready,
+            "handover_mode": "location", "sensitive": False})
+        # a directory match's own email is used automatically when none was typed
+        assert r8.json()["task"]["recipient_email"] == "xu-test-fixture@stevens.edu"
+        c.post(f"/api/ga/ticket/{r8.json()['id']}/action", headers=GA,
+              json={"ga_name": "GA Two", "action": "mark_ready"})
+        sid8 = c.post("/api/session").json()["session_id"]
+        _ask_text(c, sid8, "I'm Prof. Xu")  # a literal alias in the fixture, not the stored recipient_name
+        last8 = _ask_text(c, sid8, "here to collect my supplies")
+        assert "shelf 3" in last8["text"], last8
+
+        # --- 8. "Make pickup" provenance: from_task_id carries through to the task JSON ---
+        r9 = c.post("/api/ga/pickups", headers=GA, json={
+            "ga_name": "GA Two", "recipient_name": "Prof. Rivera", "description": "Print job copies",
+            "location": "shelf 4", "ready_time": ready, "handover_mode": "location", "sensitive": False,
+            "from_task_id": 999})
+        assert r9.json()["task"]["from_task_id"] == 999
+
+        # --- 9. uncollected: shows up in the digest once 2+ days past ready ---
+        r10 = c.post("/api/ga/pickups", headers=GA, json={
+            "ga_name": "GA Two", "recipient_name": "Prof. Stale", "description": "Old copies",
+            "location": "shelf 5", "ready_time": ready, "handover_mode": "location", "sensitive": False})
+        db = SessionLocal()
+        stale = db.get(Ticket, r10.json()["id"])
+        stale.next_deadline = db_utcnow3() - timedelta(minutes=1)
+        db.commit()
+        dg = c.get("/api/admin/digest", headers=A).json()
+        assert any(x["recipient"] == "Prof. Stale" for x in dg["uncollected_pickups"])
+        db.delete(stale); db.commit(); db.close()
+
+        # --- cleanup: every ChatSession/Ticket created in this test ---
+        db = SessionLocal()
+        for tix in (tid, tid3, tid4, tid5, r7.json()["id"], r8.json()["id"], r9.json()["id"]):
+            row = db.get(Ticket, tix)
+            if row:
+                sess_row = db.get(_ChatSession, row.session_id)
+                db.delete(row)
+                if sess_row:
+                    db.delete(sess_row)
+        for pl in db.scalars(select(_PickupLog)).all():
+            db.delete(pl)
+        db.commit(); db.close()
+    print("pickups test passed")
+
+
 FAQ_REGRESSION_QUESTIONS = [
     "can I park here",
     "oh where is the printer",
@@ -2556,6 +2748,7 @@ if __name__ == "__main__":
     test_route_topics_here_excludes_from_role_matching()
     test_place_matching()
     test_self_introduction_vs_lookup()
+    test_pickups_creation_matching_codes_and_lockout()
     test_common_word_gate_faq_regression()
     test_message_ticket_deadline_and_escalation()
     test_ga_directory_search()

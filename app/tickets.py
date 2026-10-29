@@ -10,10 +10,10 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, update
 
-from . import retention, schedule, storage, teams, tokens
+from . import pickups, retention, schedule, storage, teams, tokens
 from .config import lead_ga, load_team, settings
-from .db import (ApprovalLog, ChatSession, Item, Message, MonthlyExport, QueryLog, ReminderLog, TaskFile, Ticket,
-                 TopicCount, get_today_note, kv_get, kv_set, utcnow)
+from .db import (ApprovalLog, ChatSession, Item, Message, MonthlyExport, PickupLog, QueryLog, ReminderLog,
+                 TaskFile, Ticket, TopicCount, get_today_note, kv_get, kv_set, utcnow)
 
 log = logging.getLogger("virtual_ga.tickets")
 TZ = ZoneInfo(settings.TIMEZONE)
@@ -218,6 +218,79 @@ def create_approval_ticket(db, sess: ChatSession, name: str, email: str | None, 
     return t
 
 
+# ---------- pickups ----------
+
+def create_pickup_ticket(db, ga_name: str, recipient_name: str, recipient_person_id: int | None,
+                         recipient_email: str | None, description: str, location: str,
+                         ready_time: datetime, sensitive: bool, handover_mode: str,
+                         from_task_id: int | None = None) -> Ticket:
+    """A GA preparing something for a named recipient to collect later - not a visitor
+    request, so there's no visitor session yet. A small session exists purely so the
+    ticket has somewhere to attach (Ticket.session_id is a required FK), with
+    visitor_name set to the recipient so the GA console's existing "Visitor" display
+    needs no pickup-specific code. next_deadline is ready_time plus the 2-day
+    uncollected grace period (not ready_time itself - an item isn't "overdue" just
+    because it's ready, only once nobody's collected it a while after), so it goes
+    through the exact same reminder ladder as everything else once that passes.
+    Auto-claimed to the creating GA, same as every other "someone needs to own this
+    starting now" ticket."""
+    if handover_mode not in ("location", "in_person"):
+        raise ValueError("handover_mode must be 'location' or 'in_person'")
+    sess = ChatSession(visitor_name=recipient_name.strip()[:120])
+    db.add(sess)
+    db.flush()
+    t = Ticket(session_id=sess.id, question=f"Pickup: {description.strip()[:200]}", kind="pickup",
+              due_at=ready_time, next_deadline=ready_time + timedelta(days=pickups.UNCOLLECTED_AFTER_DAYS),
+              task={"recipient_name": recipient_name.strip()[:200], "recipient_person_id": recipient_person_id,
+                    "recipient_email": (recipient_email or "").strip()[:200] or None,
+                    "description": description.strip()[:500], "location": location.strip()[:200],
+                    "sensitive": bool(sensitive), "handover_mode": handover_mode, "ready": False,
+                    "from_task_id": from_task_id})
+    db.add(t)
+    db.flush()
+    claim_ticket(db, t.id, ga_name)
+    db.commit()
+    return t
+
+
+def mark_pickup_ready(db, t: Ticket, ga_name: str) -> dict:
+    """Sensitive pickups get a fresh 4-digit code - only its hash is ever stored -
+    emailed to the recipient if there's an address on file and SMTP is configured,
+    otherwise returned here once for the GA to pass on by phone or in person.
+    Non-sensitive pickups just become visible to the visitor-matching flow, no code
+    needed. Callable again later (e.g. to recover from a lockout) to issue a fresh code,
+    resetting attempts/lock."""
+    if t.kind != "pickup":
+        raise ValueError("That action is only for a pickup.")
+    task = dict(t.task or {})
+    task["ready"] = True
+    result = {"sensitive": bool(task.get("sensitive")), "code": None, "emailed": False}
+    if task.get("sensitive"):
+        code = pickups.generate_code()
+        task["code_hash"] = pickups.hash_code(t.id, code)
+        task["code_expires_at"] = (utcnow() + timedelta(days=pickups.CODE_EXPIRE_DAYS)).isoformat()
+        task["code_attempts"] = 0
+        task["locked"] = False
+        result["emailed"] = pickups.send_pickup_code_email(task, code)
+        if not result["emailed"]:
+            result["code"] = code
+    t.task = task
+    db.commit()
+    return result
+
+
+def alert_ga_on_shift(t: Ticket, title: str, body_text: str, style: str = "default") -> None:
+    """A Teams alert that targets whoever is on shift RIGHT NOW, falling back to the
+    lead if nobody's on - used by pickup verification, where someone is physically at
+    the desk right now and needs a live GA, not whoever historically owns the ticket."""
+    on_shift = schedule.on_shift_now()
+    lead = lead_ga()
+    targets = on_shift if on_shift else ([lead] if lead else [])
+    teams.post(teams.build_card(
+        title=title, mention=targets, body_text=body_text,
+        lines=[("Ticket", f"#{t.id}")], buttons=[("Open and respond", ticket_url(t.id))], style=style))
+
+
 # ---------- ownership (Reliability pack) ----------
 
 def claim_ticket(db, ticket_id: int, ga_name: str) -> bool:
@@ -294,13 +367,16 @@ def end_of_today() -> datetime:
 
 
 def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = None, text: str | None = None,
-             snooze_until: str | None = None, reason: str | None = None) -> None:
+             snooze_until: str | None = None, reason: str | None = None) -> dict | None:
     """Taking any action implies ownership: an unclaimed ticket is auto-claimed to
     whoever acts on it first (claim_ticket is still atomic, so a genuine race between
     two GAs both calling an action has the same single-winner guarantee as an explicit
     claim). Once owned, only the owner or the lead may act further - everyone else gets
-    a clear error rather than silently stepping on the current owner."""
+    a clear error rather than silently stepping on the current owner. Returns None for
+    most actions; "mark_ready" returns a dict (see mark_pickup_ready) since a freshly
+    generated pickup code, when not emailed, only ever exists at this one moment."""
     sess = db.get(ChatSession, t.session_id)
+    result = None
     ga_first = ga_name.split()[0]
 
     if t.owner is None:
@@ -347,11 +423,16 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
         t.resolved_at = utcnow()
         say(db, t.session_id, "system", "This request is marked as resolved. Thanks for stopping by! "
                                         "You can keep asking me questions anytime.")
+        if t.kind == "pickup":
+            db.add(PickupLog(ticket_id=t.id, recipient_name=(t.task or {}).get("recipient_name", ""),
+                             verified_by="ga_in_person"))
     elif action in ("approve", "decline", "hand_in_person"):
         if t.kind != "approval":
             raise ValueError("That action is only for an approval request.")
         apply_approval_decision(db, t, ga_name, {"approve": "approved", "decline": "declined",
                                                  "hand_in_person": "handed_in_person"}[action], reason)
+    elif action == "mark_ready":
+        result = mark_pickup_ready(db, t, ga_name)
     else:
         raise ValueError(f"Unknown action {action}")
     if t.status in ("done", "cancelled"):
@@ -359,6 +440,7 @@ def ga_action(db, t: Ticket, ga_name: str, action: str, minutes: int | None = No
     if t.status == "done" and t.requester_email and t.confirmed is None:
         send_requester_confirmation_email(t)
     db.commit()
+    return result
 
 
 def apply_approval_decision(db, t: Ticket, actor: str, decision: str, reason: str | None = None) -> None:
@@ -592,6 +674,13 @@ def digest_data(db, day_local: datetime) -> dict:
     lend_not_returned = [{"item": t.question,
                           "due": local(t.due_at).strftime("%a %I:%M %p") if t.due_at else None}
                          for t in open_now if t.kind == "task" and (t.task or {}).get("type") == "Supplies/equipment"]
+    # Uncollected 2+ days after ready (next_deadline == ready_time + 2 days for a pickup -
+    # see create_pickup_ticket) - already captured in `overdue` above too, itemized here
+    # the same way lend_not_returned is, so it doesn't sit unnoticed in a drawer.
+    uncollected_pickups = [{"recipient": (t.task or {}).get("recipient_name", ""),
+                           "item": (t.task or {}).get("description", ""),
+                           "ready": local(t.due_at).strftime("%a %I:%M %p") if t.due_at else None}
+                          for t in open_now if t.kind == "pickup" and t.next_deadline and t.next_deadline <= utcnow()]
     return {
         "date": start_local.strftime("%A, %b %d"),
         "questions": len(q),
@@ -607,6 +696,7 @@ def digest_data(db, day_local: datetime) -> dict:
         "done_today": done_today,
         "inventory_alerts": inventory_alerts,
         "lend_not_returned": lend_not_returned,
+        "uncollected_pickups": uncollected_pickups,
     }
 
 
@@ -619,6 +709,8 @@ def send_digest(db, day_local: datetime | None = None) -> dict:
     inv_list = "\n".join(f"- {a['item']} ({a['area']}): {a['status']}" + (" - on order" if a["on_order"] else "")
                         for a in d["inventory_alerts"]) or "None"
     lend_list = "\n".join(f"- {x['item']} - due {x['due']}" for x in d["lend_not_returned"]) or "None"
+    pickup_list = "\n".join(f"- {x['recipient']}: {x['item']} - ready since {x['ready']}"
+                           for x in d["uncollected_pickups"]) or "None"
     teams.post(teams.build_card(
         title=f"Virtual GA daily digest: {d['date']}",
         mention=[lead] if lead else [],
@@ -635,6 +727,7 @@ def send_digest(db, day_local: datetime | None = None) -> dict:
         body_text=f"**Open items by owner:**\n{owner_list}\n\n"
                   f"**Low/out of stock:**\n{inv_list}\n\n"
                   f"**Borrowed items not yet returned:**\n{lend_list}\n\n"
+                  f"**Pickups uncollected 2+ days after ready:**\n{pickup_list}\n\n"
                   f"**Questions the bot couldn't answer (add these to the knowledge base):**\n{gap_list}\n\n"
                   f"**Sample of questions it handled:**\n{answered}",
         buttons=[("Open admin", f"{settings.PUBLIC_BASE_URL}/admin")],
